@@ -1,215 +1,255 @@
-# =====================================================
-# 🔧 LOAD ENV
-# =====================================================
-import os, sys, time, asyncio
+import os, json, asyncio, time, sys
 from dotenv import load_dotenv
+from telethon import TelegramClient, events, Button
 
-from telethon import TelegramClient, events
-from telethon.tl.types import MessageMediaWebPage
+# ================= ENV =================
+load_dotenv("/home/ubuntu/telegram-bot/.env")
 
-load_dotenv()
+def must(k):
+    v = os.getenv(k)
+    if not v:
+        raise RuntimeError(f"Missing ENV {k}")
+    return v
 
-api_id = int(os.getenv("API_ID"))
-api_hash = os.getenv("API_HASH")
+API_ID = int(must("API_ID"))
+API_HASH = must("API_HASH")
+ADMIN_BOT_TOKEN = must("ADMIN_BOT_TOKEN")
+MAIN_ADMIN = int(must("ADMIN_ID"))
 
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
-ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
+# ================= FILES =================
+CONFIG_FILE = "config.json"
 
-# =====================================================
-# 🔧 CONFIG
-# =====================================================
-SOURCE_BOT_MAP = {
-    -1003424409974: {
-        "username": "@DW2DW_LinkConverterBot",
-        "id": 7247805209
-    },
-    -1003619801050: {
-        "username": "@LinkConvertTera3bot",
-        "id": 8236128760
-    }
-}
+def load_config():
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
 
-DESTINATION_CHANNELS = [
-    -1003665638166,
-    -1003510197761,
-    -1003339660010
-]
+def save_config(c):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(c, f, indent=2)
 
-BATCH_SIZE = 10
-INTERVAL = 1800
-RETRY_DELAY = 90
+CONFIG = load_config()
 
-BUSY_KEYWORDS = ["system busy", "try again", "busy"]
+# add main admin if not present
+if MAIN_ADMIN not in CONFIG["admins"]:
+    CONFIG["admins"].append(MAIN_ADMIN)
+    save_config(CONFIG)
+
+ADMINS = set(CONFIG["admins"])
+
+# ================= CLIENTS =================
+client = TelegramClient("main_session", API_ID, API_HASH)
+admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
+
+# ================= RUNTIME =================
 SYSTEM_PAUSED = False
+QUEUES = {}
 
-# =====================================================
-# 🔧 CLIENTS (IMPORTANT FIX HERE)
-# =====================================================
-client = TelegramClient("main_session", api_id, api_hash)
-admin_bot = TelegramClient("admin_session", api_id, api_hash)
+def init_runtime():
+    QUEUES.clear()
+    for b, bot in CONFIG["bots"].items():
+        QUEUES[b] = {}
+        for s in bot["sources"]:
+            QUEUES[b][str(s)] = []
 
-# =====================================================
-# 🔧 QUEUES
-# =====================================================
-queues = {sid: [] for sid in SOURCE_BOT_MAP}
-retry_queues = {sid: [] for sid in SOURCE_BOT_MAP}
-BOT_IDS = [v["id"] for v in SOURCE_BOT_MAP.values()]
+# ================= ALERT =================
+async def alert(msg):
+    for a in ADMINS:
+        try:
+            await admin_bot.send_message(a, msg)
+        except:
+            pass
 
-# =====================================================
-# 🔁 AUTO RESTART
-# =====================================================
+# ================= RESTART =================
 def restart():
-    time.sleep(3)
+    time.sleep(2)
     os.execv(sys.executable, ["python"] + sys.argv)
 
-# =====================================================
-# 📥 SOURCE → QUEUE
-# =====================================================
-@client.on(events.NewMessage(chats=list(SOURCE_BOT_MAP.keys())))
+# ================= SOURCE LISTENER =================
+@client.on(events.NewMessage)
 async def collect(event):
-    queues[event.chat_id].append(event.message)
-    print(f"📦 Queue[{event.chat_id}] = {len(queues[event.chat_id])}")
+    for b, bot in CONFIG["bots"].items():
+        if event.chat_id in bot["sources"]:
+            QUEUES[b][str(event.chat_id)].append(event.message)
 
-# =====================================================
-# 🚀 BOT WORKER
-# =====================================================
-async def bot_worker(source_id):
-    global SYSTEM_PAUSED
-    bot = SOURCE_BOT_MAP[source_id]
-    q = queues[source_id]
-
+# ================= WORKER =================
+async def worker(b):
+    bot = CONFIG["bots"][b]
     while True:
-        try:
-            if SYSTEM_PAUSED:
-                await asyncio.sleep(5)
+        if SYSTEM_PAUSED:
+            await asyncio.sleep(3)
+            continue
+
+        for src, q in QUEUES[b].items():
+            if not q:
                 continue
 
-            qlen = len(q)
+            batch = q[:CONFIG["batch_size"]]
+            del q[:CONFIG["batch_size"]]
 
-            if 0 < qlen <= BATCH_SIZE:
-                batch = q[:]
-                q.clear()
-
-                for msg in batch:
-                    if msg.media:
-                        await client.send_file(bot["username"], msg.media, caption=msg.text)
-                    else:
-                        await client.send_message(bot["username"], msg.text)
-                continue
-
-            if qlen > BATCH_SIZE:
-                batch = q[:BATCH_SIZE]
-                del q[:BATCH_SIZE]
-
-                for msg in batch:
-                    if msg.media:
-                        await client.send_file(bot["username"], msg.media, caption=msg.text)
-                    else:
-                        await client.send_message(bot["username"], msg.text)
-
-                await asyncio.sleep(INTERVAL)
-
-            await asyncio.sleep(1)
-
-        except Exception as e:
-            print("🔥 Worker error:", e)
-            restart()
-
-# =====================================================
-# 🔁 RETRY WORKER
-# =====================================================
-async def retry_worker(source_id):
-    bot = SOURCE_BOT_MAP[source_id]
-    rq = retry_queues[source_id]
-
-    while True:
-        try:
-            if rq:
-                msg = rq.pop(0)
-                if msg.media:
-                    await client.send_file(bot["username"], msg.media, caption=msg.text)
+            for m in batch:
+                if m.media:
+                    await client.send_file(bot["username"], m.media, caption=m.text)
                 else:
-                    await client.send_message(bot["username"], msg.text)
-                await asyncio.sleep(RETRY_DELAY)
-            else:
-                await asyncio.sleep(5)
-        except Exception as e:
-            print("🔥 Retry error:", e)
-            restart()
+                    await client.send_message(bot["username"], m.text)
 
-# =====================================================
-# 🔗 BOT REPLY → DESTINATION
-# =====================================================
-@client.on(events.NewMessage(from_users=BOT_IDS))
+            if len(batch) == CONFIG["batch_size"]:
+                await asyncio.sleep(CONFIG["interval"])
+
+        await asyncio.sleep(1)
+
+# ================= BOT REPLY =================
+@client.on(events.NewMessage)
 async def bot_reply(event):
-    text_lower = (event.message.text or "").lower()
-    if any(k in text_lower for k in BUSY_KEYWORDS):
-        return
+    for bot in CONFIG["bots"].values():
+        if event.sender_id == bot["id"]:
+            for d in bot["destinations"]:
+                if event.message.media:
+                    await client.send_file(d, event.message.media, caption=event.text)
+                else:
+                    await client.send_message(d, event.text)
 
-    for ch in DESTINATION_CHANNELS:
-        try:
-            if isinstance(event.message.media, MessageMediaWebPage):
-                await client.send_message(ch, event.message.text)
-            elif event.message.media:
-                await client.send_file(ch, event.message.media, caption=event.message.text)
-            else:
-                await client.send_message(ch, event.message.text)
-        except Exception as e:
-            print("❌ Forward error:", e)
+# ================= PANEL =================
+def panel():
+    return [
+        [Button.inline("➕ Add Bot", b"add_bot"), Button.inline("❌ Remove Bot", b"rm_bot")],
+        [Button.inline("➕ Add Source", b"add_src"), Button.inline("❌ Remove Source", b"rm_src")],
+        [Button.inline("➕ Add Dest", b"add_dest")],
+        [Button.inline("📦 Batch +", b"b+"), Button.inline("📦 Batch -", b"b-")],
+        [Button.inline("⏳ Interval +", b"i+"), Button.inline("⏳ Interval -", b"i-")],
+        [Button.inline("👥 Add Admin", b"add_admin")],
+        [Button.inline("📊 Stats", b"stats")],
+        [Button.inline("⏸ Pause", b"pause"), Button.inline("▶ Start", b"start")],
+        [Button.inline("♻ Restart", b"restart")]
+    ]
 
-# =====================================================
-# 👑 ADMIN COMMANDS (FIXED & SIMPLE)
-# =====================================================
+STATE = {}
+
+# ================= ADMIN COMMAND =================
 @admin_bot.on(events.NewMessage)
-async def admin_commands(event):
-    global SYSTEM_PAUSED, INTERVAL, BATCH_SIZE
-
-    if event.sender_id != ADMIN_ID:
-        return
-    if not event.text:
+async def admin_cmd(event):
+    if event.sender_id not in ADMINS:
         return
 
-    cmd = event.text.lower().strip()
+    if event.text == "/panel":
+        await event.reply("🛠 ADMIN PANEL", buttons=panel())
 
-    if cmd == "/status":
-        await event.reply("✅ ADMIN BOT WORKING")
+    elif STATE.get("mode") == "add_admin":
+        aid = int(event.text)
+        ADMINS.add(aid)
+        CONFIG["admins"].append(aid)
+        save_config(CONFIG)
+        STATE.clear()
+        await event.reply("✅ Admin added")
 
-    elif cmd == "/pause":
+    elif STATE.get("mode") == "add_bot":
+        u, i = event.text.split()
+        key = f"bot{len(CONFIG['bots'])+1}"
+        CONFIG["bots"][key] = {"username": u, "id": int(i), "sources": [], "destinations": []}
+        save_config(CONFIG)
+        init_runtime()
+        asyncio.create_task(worker(key))
+        STATE.clear()
+        await event.reply("✅ Bot added")
+
+    elif STATE.get("mode") == "add_src":
+        b, s = event.text.split()
+        CONFIG["bots"][b]["sources"].append(int(s))
+        save_config(CONFIG)
+        init_runtime()
+        STATE.clear()
+        await event.reply("✅ Source added")
+
+    elif STATE.get("mode") == "rm_src":
+        b, s = event.text.split()
+        CONFIG["bots"][b]["sources"].remove(int(s))
+        save_config(CONFIG)
+        init_runtime()
+        STATE.clear()
+        await event.reply("❌ Source removed")
+
+    elif STATE.get("mode") == "add_dest":
+        b, d = event.text.split()
+        CONFIG["bots"][b]["destinations"].append(int(d))
+        save_config(CONFIG)
+        STATE.clear()
+        await event.reply("✅ Destination added")
+
+# ================= BUTTONS =================
+@admin_bot.on(events.CallbackQuery)
+async def btn(event):
+    if event.sender_id not in ADMINS:
+        return
+
+    d = event.data.decode()
+
+    if d == "add_admin":
+        STATE["mode"] = "add_admin"
+        await event.edit("Send new ADMIN_ID")
+
+    elif d == "add_bot":
+        STATE["mode"] = "add_bot"
+        await event.edit("Send: @botusername bot_id")
+
+    elif d == "add_src":
+        STATE["mode"] = "add_src"
+        await event.edit("Send: bot_key source_id")
+
+    elif d == "rm_src":
+        STATE["mode"] = "rm_src"
+        await event.edit("Send: bot_key source_id")
+
+    elif d == "add_dest":
+        STATE["mode"] = "add_dest"
+        await event.edit("Send: bot_key destination_id")
+
+    elif d == "b+":
+        CONFIG["batch_size"] += 1; save_config(CONFIG)
+        await event.edit("Batch updated", buttons=panel())
+
+    elif d == "b-":
+        CONFIG["batch_size"] = max(1, CONFIG["batch_size"]-1); save_config(CONFIG)
+        await event.edit("Batch updated", buttons=panel())
+
+    elif d == "i+":
+        CONFIG["interval"] += 300; save_config(CONFIG)
+        await event.edit("Interval updated", buttons=panel())
+
+    elif d == "i-":
+        CONFIG["interval"] = max(60, CONFIG["interval"]-300); save_config(CONFIG)
+        await event.edit("Interval updated", buttons=panel())
+
+    elif d == "stats":
+        msg = ""
+        for b, srcs in QUEUES.items():
+            msg += f"\n🤖 {b}\n"
+            for s, q in srcs.items():
+                msg += f"{s} → {len(q)}\n"
+        await event.edit(msg or "No data", buttons=panel())
+
+    elif d == "pause":
+        global SYSTEM_PAUSED
         SYSTEM_PAUSED = True
-        await event.reply("⏸ Bot paused")
+        await event.edit("⏸ Paused", buttons=panel())
 
-    elif cmd == "/start":
+    elif d == "start":
         SYSTEM_PAUSED = False
-        await event.reply("▶ Bot resumed")
+        await event.edit("▶ Started", buttons=panel())
 
-    elif cmd.startswith("/setinterval"):
-        INTERVAL = int(cmd.split()[1])
-        await event.reply(f"⏳ Interval set to {INTERVAL}")
-
-    elif cmd.startswith("/setbatch"):
-        BATCH_SIZE = int(cmd.split()[1])
-        await event.reply(f"📦 Batch size set to {BATCH_SIZE}")
-
-    elif cmd == "/restart":
-        await event.reply("♻ Restarting")
+    elif d == "restart":
+        await alert("♻ Bot restarting")
         restart()
 
-# =====================================================
-# ▶ START SYSTEM
-# =====================================================
+# ================= START =================
 async def main():
+    init_runtime()
     await client.start()
     await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
 
-    for sid in SOURCE_BOT_MAP:
-        asyncio.create_task(bot_worker(sid))
-        asyncio.create_task(retry_worker(sid))
+    for b in CONFIG["bots"]:
+        asyncio.create_task(worker(b))
 
-    print("🚀 MAIN BOT + ADMIN BOT BOTH RUNNING")
-
-    await asyncio.gather(
-        client.run_until_disconnected(),
-        admin_bot.run_until_disconnected()
-    )
+    await alert("✅ Bot started successfully")
+    await asyncio.gather(client.run_until_disconnected(),
+                         admin_bot.run_until_disconnected())
 
 client.loop.run_until_complete(main())
