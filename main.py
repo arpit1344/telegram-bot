@@ -2,9 +2,7 @@ import os, json, asyncio, sys
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
 
-# =====================================================
-# ENV
-# =====================================================
+# ================= ENV =================
 load_dotenv("/home/ubuntu/telegram-bot/.env")
 
 API_ID = int(os.getenv("API_ID"))
@@ -12,9 +10,7 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# =====================================================
-# FILES
-# =====================================================
+# ================= CONFIG =================
 CONFIG_FILE = "config.json"
 
 def load_config():
@@ -28,58 +24,86 @@ def save_config(cfg):
 CONFIG = load_config()
 ADMINS = set(CONFIG.get("admins", []))
 
-# =====================================================
-# CLIENTS
-# =====================================================
+# ================= CLIENTS =================
 client = TelegramClient("main_session", API_ID, API_HASH)
 admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
 
-# =====================================================
-# RUNTIME STATE
-# =====================================================
+# ================= STATE =================
 SYSTEM_PAUSED = False
-QUEUES = {}        # { bot_key : { source_id : [messages] } }
-STATE = {}         # admin conversation state
+QUEUES = {}
+STATE = {
+    "selected_bot": None,
+    "mode": None
+}
 
-# =====================================================
-# INIT QUEUES (ONE TIME – SAFE)
-# =====================================================
+# ================= INIT QUEUES =================
 def init_queues():
     QUEUES.clear()
     for b, bot in CONFIG["bots"].items():
         QUEUES[b] = {}
-        for s in bot["sources"]:
+        for s in bot.get("sources", []):
             QUEUES[b][str(s)] = []
 
 init_queues()
 
-# =====================================================
-# ADMIN PANEL UI
-# =====================================================
+# ================= AUTO SOURCE ID DETECT =================
+async def detect_channel_id(event):
+    if event.forward and event.forward.chat:
+        return event.forward.chat.id
+
+    text = (event.text or "").strip()
+
+    if text.startswith("-100"):
+        return int(text)
+
+    if text.startswith("@"):
+        ent = await client.get_entity(text)
+        return ent.id
+
+    if "t.me/" in text:
+        uname = text.split("t.me/")[-1]
+        ent = await client.get_entity(uname)
+        return ent.id
+
+    return None
+
+# ================= PANEL =================
 def panel():
+    sel = STATE.get("selected_bot")
+    sel_txt = sel if sel else "None"
+
     return [
-        [Button.inline("🤖 Bots", b"bots"), Button.inline("📊 Status", b"status")],
-        [Button.inline("➕ Add Bot", b"add_bot"), Button.inline("❌ Remove Bot", b"rm_bot")],
+        [Button.inline(f"🤖 Select Bot ({sel_txt})", b"select_bot")],
+        [Button.inline("📊 Status", b"status")],
+
         [Button.inline("➕ Add Source", b"add_src"), Button.inline("❌ Remove Source", b"rm_src")],
         [Button.inline("➕ Add Dest", b"add_dest"), Button.inline("❌ Remove Dest", b"rm_dest")],
-        [Button.inline("📦 Batch +", b"b+"), Button.inline("📦 Batch -", b"b-")],
-        [Button.inline("⏳ Interval +", b"i+"), Button.inline("⏳ Interval -", b"i-")],
+
+        [
+            Button.inline("📦 5", b"b_5"),
+            Button.inline("📦 10", b"b_10"),
+            Button.inline("📦 20", b"b_20"),
+            Button.inline("📦 50", b"b_50")
+        ],
+        [
+            Button.inline("⏳ 5m", b"i_300"),
+            Button.inline("⏳ 10m", b"i_600"),
+            Button.inline("⏳ 30m", b"i_1800"),
+            Button.inline("⏳ 60m", b"i_3600")
+        ],
+
         [Button.inline("⏸ Pause", b"pause"), Button.inline("▶ Start", b"start")],
         [Button.inline("♻ Restart", b"restart")]
     ]
 
-# =====================================================
-# SOURCE LISTENER
-# =====================================================
+# ================= SOURCE LISTENER =================
 @client.on(events.NewMessage)
 async def collect(event):
     for b, bot in CONFIG["bots"].items():
-        if event.chat_id in bot["sources"]:
+        if event.chat_id in bot.get("sources", []):
             QUEUES[b][str(event.chat_id)].append(event.message)
 
-# =====================================================
-# WORKER (PER BOT)
-# =====================================================
+# ================= WORKER =================
 async def worker(bot_key):
     bot = CONFIG["bots"][bot_key]
 
@@ -88,35 +112,36 @@ async def worker(bot_key):
             await asyncio.sleep(2)
             continue
 
+        batch = bot.get("batch", 10)
+        interval = bot.get("interval", 1800)
+
+        sent = 0
         for src, q in QUEUES[bot_key].items():
-            if not q:
-                continue
+            while q and sent < batch:
+                msg = q.pop(0)
+                if msg.media:
+                    await client.send_file(bot["username"], msg.media, caption=msg.text)
+                else:
+                    await client.send_message(bot["username"], msg.text)
+                sent += 1
 
-            msg = q.pop(0)
-
-            if msg.media:
-                await client.send_file(bot["username"], msg.media, caption=msg.text)
-            else:
-                await client.send_message(bot["username"], msg.text)
+        if sent >= batch:
+            await asyncio.sleep(interval)
 
         await asyncio.sleep(1)
 
-# =====================================================
-# BOT → DESTINATION
-# =====================================================
+# ================= BOT → DEST =================
 @client.on(events.NewMessage)
 async def bot_reply(event):
     for bot in CONFIG["bots"].values():
         if event.sender_id == bot["id"]:
-            for d in bot["destinations"]:
+            for d in bot.get("destinations", []):
                 if event.message.media:
                     await client.send_file(d, event.message.media, caption=event.text)
                 else:
                     await client.send_message(d, event.text)
 
-# =====================================================
-# ADMIN TEXT COMMANDS
-# =====================================================
+# ================= ADMIN TEXT =================
 @admin_bot.on(events.NewMessage)
 async def admin_text(event):
     if event.sender_id not in ADMINS:
@@ -131,45 +156,48 @@ async def admin_text(event):
         return
 
     mode = STATE.get("mode")
+    bot = STATE.get("selected_bot")
 
-    if mode == "add_bot":
-        u, i = text.split()
-        key = f"bot{len(CONFIG['bots'])+1}"
-        CONFIG["bots"][key] = {
-            "username": u,
-            "id": int(i),
-            "sources": [],
-            "destinations": []
-        }
-        save_config(CONFIG)
-        QUEUES[key] = {}
-        asyncio.create_task(worker(key))
-        STATE.clear()
-        await event.reply("✅ Bot added")
+    if not bot:
+        await event.reply("❗ Select a bot first using 🤖 Select Bot")
         return
 
     if mode == "add_src":
-        b, s = text.split()
-        CONFIG["bots"][b]["sources"].append(int(s))
-        QUEUES[b][str(s)] = []
+        cid = await detect_channel_id(event)
+        if not cid:
+            await event.reply("❌ Cannot detect channel")
+            return
+        CONFIG["bots"][bot].setdefault("sources", []).append(cid)
+        QUEUES[bot][str(cid)] = []
         save_config(CONFIG)
-        STATE.clear()
-        await event.reply("✅ Source added")
-        return
+        STATE["mode"] = None
+        await event.reply(f"✅ Source added\n{cid}", buttons=panel())
 
-    if mode == "add_dest":
-        b, d = text.split()
-        CONFIG["bots"][b]["destinations"].append(int(d))
+    elif mode == "rm_src":
+        cid = int(text)
+        CONFIG["bots"][bot]["sources"].remove(cid)
+        QUEUES[bot].pop(str(cid), None)
         save_config(CONFIG)
-        STATE.clear()
-        await event.reply("✅ Destination added")
-        return
+        STATE["mode"] = None
+        await event.reply("❌ Source removed", buttons=panel())
 
-# =====================================================
-# ADMIN BUTTONS
-# =====================================================
+    elif mode == "add_dest":
+        did = int(text)
+        CONFIG["bots"][bot].setdefault("destinations", []).append(did)
+        save_config(CONFIG)
+        STATE["mode"] = None
+        await event.reply("✅ Destination added", buttons=panel())
+
+    elif mode == "rm_dest":
+        did = int(text)
+        CONFIG["bots"][bot]["destinations"].remove(did)
+        save_config(CONFIG)
+        STATE["mode"] = None
+        await event.reply("❌ Destination removed", buttons=panel())
+
+# ================= BUTTONS =================
 @admin_bot.on(events.CallbackQuery)
-async def admin_buttons(event):
+async def buttons(event):
     global SYSTEM_PAUSED
 
     if event.sender_id not in ADMINS:
@@ -177,63 +205,62 @@ async def admin_buttons(event):
 
     d = event.data.decode()
 
-    # -------- STATUS --------
-    if d == "status":
+    # ---- BOT SELECT ----
+    if d == "select_bot":
+        rows = [
+            [Button.inline(f"{k} ({v['username']})", f"sel_{k}".encode())]
+            for k, v in CONFIG["bots"].items()
+        ]
+        await event.edit("🤖 Select a bot:", buttons=rows)
+
+    elif d.startswith("sel_"):
+        STATE["selected_bot"] = d.replace("sel_", "")
+        await event.edit("✅ Bot selected", buttons=panel())
+
+    # ---- STATUS ----
+    elif d == "status":
         lines = ["📊 FULL STATUS\n"]
         for b, bot in CONFIG["bots"].items():
             lines.append(f"🤖 {b} ({bot['username']})")
+            lines.append(f" Batch: {bot.get('batch',10)} | Interval: {bot.get('interval',1800)}")
             lines.append(" Sources:")
-            for s in bot["sources"]:
+            for s in bot.get("sources", []):
                 q = len(QUEUES[b][str(s)])
                 lines.append(f"  • {s} | Queue: {q}")
             lines.append(" Destinations:")
-            for x in bot["destinations"]:
+            for x in bot.get("destinations", []):
                 lines.append(f"  • {x}")
             lines.append("")
         await event.edit("\n".join(lines), buttons=panel())
 
-    # -------- BOT LIST --------
-    elif d == "bots":
-        txt = "🤖 BOTS\n\n"
-        for b, bot in CONFIG["bots"].items():
-            txt += f"{b} → {bot['username']}\n"
-        await event.edit(txt, buttons=panel())
+    # ---- MODES ----
+    elif d in ("add_src","rm_src","add_dest","rm_dest"):
+        if not STATE.get("selected_bot"):
+            await event.answer("Select a bot first", alert=True)
+            return
+        STATE["mode"] = d
+        await event.edit("Send input now", buttons=panel())
 
-    # -------- ADD / REMOVE --------
-    elif d == "add_bot":
-        STATE["mode"] = "add_bot"
-        await event.edit("Send: @botusername bot_id")
-
-    elif d == "add_src":
-        STATE["mode"] = "add_src"
-        await event.edit("Send: bot_key source_channel_id")
-
-    elif d == "add_dest":
-        STATE["mode"] = "add_dest"
-        await event.edit("Send: bot_key destination_channel_id")
-
-    # -------- BATCH / INTERVAL --------
-    elif d == "b+":
-        CONFIG["batch_size"] += 1
+    # ---- PER BOT BATCH ----
+    elif d.startswith("b_"):
+        if not STATE.get("selected_bot"):
+            await event.answer("Select a bot first", alert=True)
+            return
+        val = int(d.split("_")[1])
+        CONFIG["bots"][STATE["selected_bot"]]["batch"] = val
         save_config(CONFIG)
-        await event.edit("Batch updated", buttons=panel())
+        await event.edit(f"📦 Batch set to {val}", buttons=panel())
 
-    elif d == "b-":
-        CONFIG["batch_size"] = max(1, CONFIG["batch_size"] - 1)
+    # ---- PER BOT INTERVAL ----
+    elif d.startswith("i_"):
+        if not STATE.get("selected_bot"):
+            await event.answer("Select a bot first", alert=True)
+            return
+        val = int(d.split("_")[1])
+        CONFIG["bots"][STATE["selected_bot"]]["interval"] = val
         save_config(CONFIG)
-        await event.edit("Batch updated", buttons=panel())
+        await event.edit(f"⏳ Interval set to {val}s", buttons=panel())
 
-    elif d == "i+":
-        CONFIG["interval"] += 300
-        save_config(CONFIG)
-        await event.edit("Interval updated", buttons=panel())
-
-    elif d == "i-":
-        CONFIG["interval"] = max(60, CONFIG["interval"] - 300)
-        save_config(CONFIG)
-        await event.edit("Interval updated", buttons=panel())
-
-    # -------- SYSTEM --------
     elif d == "pause":
         SYSTEM_PAUSED = True
         await event.edit("⏸ Paused", buttons=panel())
@@ -245,9 +272,7 @@ async def admin_buttons(event):
     elif d == "restart":
         os.execv(sys.executable, ["python"] + sys.argv)
 
-# =====================================================
-# START
-# =====================================================
+# ================= START =================
 async def main():
     await client.start()
     await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
