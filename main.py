@@ -1,11 +1,11 @@
 # =====================================================
-# 🔧 LOAD ENV (NO TOKENS IN GITHUB)
+# 🔧 LOAD ENV
 # =====================================================
 import os, sys, time, asyncio
 from dotenv import load_dotenv
+
 from telethon import TelegramClient, events
 from telethon.tl.types import MessageMediaWebPage
-from telethon.sessions import StringSession
 
 load_dotenv()
 
@@ -36,23 +36,17 @@ DESTINATION_CHANNELS = [
 ]
 
 BATCH_SIZE = 10
-INTERVAL = 1800        # 30 min (used only when > batch)
+INTERVAL = 1800
 RETRY_DELAY = 90
 
 BUSY_KEYWORDS = ["system busy", "try again", "busy"]
-
 SYSTEM_PAUSED = False
 
 # =====================================================
-# 🔧 CLIENTS
+# 🔧 CLIENTS (IMPORTANT FIX HERE)
 # =====================================================
-client = TelegramClient("session", api_id, api_hash)
-
-admin_bot = TelegramClient(
-    StringSession(),
-    api_id,
-    api_hash
-).start(bot_token=ADMIN_BOT_TOKEN)
+client = TelegramClient("main_session", api_id, api_hash)
+admin_bot = TelegramClient("admin_session", api_id, api_hash)
 
 # =====================================================
 # 🔧 QUEUES
@@ -65,7 +59,6 @@ BOT_IDS = [v["id"] for v in SOURCE_BOT_MAP.values()]
 # 🔁 AUTO RESTART
 # =====================================================
 def restart():
-    print("♻ Restarting service...")
     time.sleep(3)
     os.execv(sys.executable, ["python"] + sys.argv)
 
@@ -82,7 +75,6 @@ async def collect(event):
 # =====================================================
 async def bot_worker(source_id):
     global SYSTEM_PAUSED
-
     bot = SOURCE_BOT_MAP[source_id]
     q = queues[source_id]
 
@@ -94,44 +86,27 @@ async def bot_worker(source_id):
 
             qlen = len(q)
 
-            # CASE 1: 1–BATCH → instant send
             if 0 < qlen <= BATCH_SIZE:
                 batch = q[:]
                 q.clear()
 
                 for msg in batch:
                     if msg.media:
-                        await client.send_file(
-                            bot["username"],
-                            msg.media,
-                            caption=msg.text
-                        )
+                        await client.send_file(bot["username"], msg.media, caption=msg.text)
                     else:
-                        await client.send_message(
-                            bot["username"],
-                            msg.text
-                        )
+                        await client.send_message(bot["username"], msg.text)
                 continue
 
-            # CASE 2: > BATCH → strict batch + wait
             if qlen > BATCH_SIZE:
                 batch = q[:BATCH_SIZE]
                 del q[:BATCH_SIZE]
 
                 for msg in batch:
                     if msg.media:
-                        await client.send_file(
-                            bot["username"],
-                            msg.media,
-                            caption=msg.text
-                        )
+                        await client.send_file(bot["username"], msg.media, caption=msg.text)
                     else:
-                        await client.send_message(
-                            bot["username"],
-                            msg.text
-                        )
+                        await client.send_message(bot["username"], msg.text)
 
-                print(f"⏳ Waiting {INTERVAL}s for {bot['username']}")
                 await asyncio.sleep(INTERVAL)
 
             await asyncio.sleep(1)
@@ -152,16 +127,9 @@ async def retry_worker(source_id):
             if rq:
                 msg = rq.pop(0)
                 if msg.media:
-                    await client.send_file(
-                        bot["username"],
-                        msg.media,
-                        caption=msg.text
-                    )
+                    await client.send_file(bot["username"], msg.media, caption=msg.text)
                 else:
-                    await client.send_message(
-                        bot["username"],
-                        msg.text
-                    )
+                    await client.send_message(bot["username"], msg.text)
                 await asyncio.sleep(RETRY_DELAY)
             else:
                 await asyncio.sleep(5)
@@ -175,9 +143,7 @@ async def retry_worker(source_id):
 @client.on(events.NewMessage(from_users=BOT_IDS))
 async def bot_reply(event):
     text_lower = (event.message.text or "").lower()
-
     if any(k in text_lower for k in BUSY_KEYWORDS):
-        print("⏳ Busy reply ignored")
         return
 
     for ch in DESTINATION_CHANNELS:
@@ -185,26 +151,30 @@ async def bot_reply(event):
             if isinstance(event.message.media, MessageMediaWebPage):
                 await client.send_message(ch, event.message.text)
             elif event.message.media:
-                await client.send_file(
-                    ch,
-                    event.message.media,
-                    caption=event.message.text
-                )
+                await client.send_file(ch, event.message.media, caption=event.message.text)
             else:
                 await client.send_message(ch, event.message.text)
         except Exception as e:
             print("❌ Forward error:", e)
 
 # =====================================================
-# 👑 ADMIN COMMANDS
+# 👑 ADMIN COMMANDS (FIXED & SIMPLE)
 # =====================================================
-@admin_bot.on(events.NewMessage(from_users=ADMIN_ID))
+@admin_bot.on(events.NewMessage)
 async def admin_commands(event):
     global SYSTEM_PAUSED, INTERVAL, BATCH_SIZE
 
+    if event.sender_id != ADMIN_ID:
+        return
+    if not event.text:
+        return
+
     cmd = event.text.lower().strip()
 
-    if cmd == "/pause":
+    if cmd == "/status":
+        await event.reply("✅ ADMIN BOT WORKING")
+
+    elif cmd == "/pause":
         SYSTEM_PAUSED = True
         await event.reply("⏸ Bot paused")
 
@@ -214,47 +184,29 @@ async def admin_commands(event):
 
     elif cmd.startswith("/setinterval"):
         INTERVAL = int(cmd.split()[1])
-        await event.reply(f"⏳ Interval set to {INTERVAL}s")
+        await event.reply(f"⏳ Interval set to {INTERVAL}")
 
     elif cmd.startswith("/setbatch"):
         BATCH_SIZE = int(cmd.split()[1])
         await event.reply(f"📦 Batch size set to {BATCH_SIZE}")
 
-    elif cmd == "/status":
-        msg = f"""
-📊 STATUS
-
-Paused: {SYSTEM_PAUSED}
-Batch: {BATCH_SIZE}
-Interval: {INTERVAL}
-
-Queues:
-"""
-        for sid, q in queues.items():
-            msg += f"\n{sid} → {len(q)}"
-        await event.reply(msg)
-
     elif cmd == "/restart":
-        await event.reply("♻ Restarting bot")
+        await event.reply("♻ Restarting")
         restart()
-
-    else:
-        await event.reply(
-            "/pause\n/start\n/setinterval 1800\n/setbatch 10\n/status\n/restart"
-        )
 
 # =====================================================
 # ▶ START SYSTEM
 # =====================================================
 async def main():
     await client.start()
-    await admin_bot.start()
+    await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
 
     for sid in SOURCE_BOT_MAP:
         asyncio.create_task(bot_worker(sid))
         asyncio.create_task(retry_worker(sid))
 
-    print("🚀 BOT + ADMIN RUNNING")
+    print("🚀 MAIN BOT + ADMIN BOT BOTH RUNNING")
+
     await asyncio.gather(
         client.run_until_disconnected(),
         admin_bot.run_until_disconnected()
