@@ -1,4 +1,4 @@
-import os, asyncio, sys, time, json
+import os, asyncio, sys, time
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
 
@@ -10,7 +10,7 @@ API_HASH = os.getenv("API_HASH")
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
-# ================= CLIENTS =================
+# ================= CLIENTS (DEFINE FIRST!) =================
 client = TelegramClient("main_session", API_ID, API_HASH)
 admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
 
@@ -24,7 +24,7 @@ def panel():
         [Button.inline("⏸ Pause", b"pause"), Button.inline("▶ Start", b"start")],
     ]
 
-# ================= ADMIN HANDLER (SINGLE & CLEAN) =================
+# ================= ADMIN MESSAGE HANDLER =================
 @admin_bot.on(events.NewMessage)
 async def admin_handler(event):
     global SYSTEM_PAUSED
@@ -35,8 +35,7 @@ async def admin_handler(event):
         return
 
     text = event.text.strip().lower()
-
-    print("ADMIN CMD:", text)  # DEBUG LOG
+    print("ADMIN CMD:", text)   # log me dikhega
 
     if text == "/start":
         await event.reply("✅ Admin bot running")
