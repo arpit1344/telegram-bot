@@ -8,7 +8,6 @@ load_dotenv("/home/ubuntu/telegram-bot/.env")
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # ================= CONFIG =================
 CONFIG_FILE = "config.json"
@@ -34,6 +33,7 @@ AUTO_SCALE = True
 
 QUEUES = {}
 STATS = {}
+
 STATE = {
     "selected_bot": None,
     "mode": None
@@ -45,11 +45,7 @@ def init_runtime():
     STATS.clear()
     for b, bot in CONFIG["bots"].items():
         QUEUES[b] = {}
-        STATS[b] = {
-            "total": 0,
-            "sources": {},
-            "destinations": {}
-        }
+        STATS[b] = {"total": 0, "sources": {}, "destinations": {}}
         for s in bot.get("sources", []):
             QUEUES[b][str(s)] = []
 
@@ -83,7 +79,7 @@ def auto_scale(bot_key):
     if not AUTO_SCALE:
         return
 
-    total_q = sum(len(q) for q in QUEUES[bot_key].values())
+    total_q = sum(len(q) for q in QUEUES.get(bot_key, {}).values())
     bot = CONFIG["bots"][bot_key]
 
     if total_q > 100:
@@ -98,73 +94,94 @@ def auto_scale(bot_key):
 
 # ================= PANEL =================
 def panel():
-    sel = STATE.get("selected_bot") or "None"
+    sel = STATE["selected_bot"] or "None"
     return [
-        [
-            Button.inline(f"🤖 Select Bot ({sel})", b"select_bot"),
-            Button.inline("➕ Add Bot", b"add_bot"),
-            Button.inline("❌ Remove Bot", b"rm_bot")
-        ],
-        [
-            Button.inline("🗃 Set Store Channel", b"set_store")
-        ],
-        [
-            Button.inline("📊 Status", b"status"),
-            Button.inline("📈 Traffic", b"traffic")
-        ],
-        [
-            Button.inline("➕ Add Source", b"add_src"),
-            Button.inline("❌ Remove Source", b"rm_src")
-        ],
-        [
-            Button.inline("➕ Add Dest", b"add_dest"),
-            Button.inline("❌ Remove Dest", b"rm_dest")
-        ],
-        [
-            Button.inline("📦 5", b"b_5"),
-            Button.inline("📦 10", b"b_10"),
-            Button.inline("📦 20", b"b_20"),
-            Button.inline("📦 50", b"b_50")
-        ],
-        [
-            Button.inline("⏳ 5m", b"i_300"),
-            Button.inline("⏳ 10m", b"i_600"),
-            Button.inline("⏳ 30m", b"i_1800"),
-            Button.inline("⏳ 60m", b"i_3600")
-        ],
-        [
-            Button.inline("🤖 AutoScale ON", b"as_on"),
-            Button.inline("🤖 AutoScale OFF", b"as_off")
-        ],
-        [
-            Button.inline("⏸ Pause", b"pause"),
-            Button.inline("▶ Start", b"start"),
-            Button.inline("♻ Restart", b"restart")
-        ],
-        [
-            Button.inline("⬅ Back", b"back")
-        ]
+        [Button.inline(f"🤖 Select Bot ({sel})", b"select_bot"),
+         Button.inline("➕ Add Bot", b"add_bot"),
+         Button.inline("❌ Remove Bot", b"rm_bot")],
+
+        [Button.inline("🗃 Set Store Channel", b"set_store")],
+
+        [Button.inline("➕ Add Source", b"add_src"),
+         Button.inline("❌ Remove Source", b"rm_src")],
+
+        [Button.inline("➕ Add Dest", b"add_dest"),
+         Button.inline("❌ Remove Dest", b"rm_dest")],
+
+        [Button.inline("📦 5", b"b_5"),
+         Button.inline("📦 10", b"b_10"),
+         Button.inline("📦 20", b"b_20"),
+         Button.inline("📦 50", b"b_50")],
+
+        [Button.inline("⏳ 5m", b"i_300"),
+         Button.inline("⏳ 10m", b"i_600"),
+         Button.inline("⏳ 30m", b"i_1800"),
+         Button.inline("⏳ 60m", b"i_3600")],
+
+        [Button.inline("🤖 AutoScale ON", b"as_on"),
+         Button.inline("🤖 AutoScale OFF", b"as_off")],
+
+        [Button.inline("⏸ Pause", b"pause"),
+         Button.inline("▶ Start", b"start"),
+         Button.inline("♻ Restart", b"restart")],
+
+        [Button.inline("📊 Status", b"status"),
+         Button.inline("📈 Traffic", b"traffic")],
+
+        [Button.inline("⬅ Back", b"back")]
     ]
 
-# ================= SOURCE LISTENER =================
+# ================= SINGLE MESSAGE ROUTER =================
 @client.on(events.NewMessage)
-async def collect(event):
+async def message_router(event):
+
+    # SOURCE → QUEUE
     for b, bot in CONFIG["bots"].items():
         if event.chat_id in bot.get("sources", []):
+            QUEUES.setdefault(b, {})
+            QUEUES[b].setdefault(str(event.chat_id), [])
             QUEUES[b][str(event.chat_id)].append(event.message)
+            return
+
+    # BOT → STORE
+    for b, bot in CONFIG["bots"].items():
+        if event.sender_id == bot["id"]:
+            store = bot.get("store_channel")
+            if not store:
+                return
+            if event.message.media:
+                await client.send_file(store, event.message.media, caption=event.text)
+            else:
+                await client.send_message(store, event.text)
+            return
+
+    # STORE → DEST
+    for b, bot in CONFIG["bots"].items():
+        if event.chat_id == bot.get("store_channel"):
+            for d in bot.get("destinations", []):
+                if event.message.media:
+                    await client.send_file(d, event.message.media, caption=event.text)
+                else:
+                    await client.send_message(d, event.text)
+
+                STATS[b]["destinations"].setdefault(str(d), 0)
+                STATS[b]["destinations"][str(d)] += 1
+            return
 
 # ================= WORKER =================
 async def worker(bot_key):
     while True:
         if SYSTEM_PAUSED:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             continue
 
-        auto_scale(bot_key)
         bot = CONFIG["bots"][bot_key]
-        sent = 0
 
-        for src, q in QUEUES[bot_key].items():
+        if AUTO_SCALE:
+            auto_scale(bot_key)
+
+        sent = 0
+        for src, q in QUEUES.get(bot_key, {}).items():
             while q and sent < bot.get("batch", 10):
                 msg = q.pop(0)
 
@@ -183,34 +200,6 @@ async def worker(bot_key):
 
         await asyncio.sleep(1)
 
-# ================= BOT → STORE =================
-@client.on(events.NewMessage)
-async def bot_to_store(event):
-    for bot in CONFIG["bots"].values():
-        if event.sender_id == bot["id"]:
-            store = bot.get("store_channel")
-            if not store:
-                return
-
-            if event.message.media:
-                await client.send_file(store, event.message.media, caption=event.text)
-            else:
-                await client.send_message(store, event.text)
-
-# ================= STORE → DEST =================
-@client.on(events.NewMessage)
-async def store_to_dest(event):
-    for b, bot in CONFIG["bots"].items():
-        if event.chat_id == bot.get("store_channel"):
-            for d in bot.get("destinations", []):
-                if event.message.media:
-                    await client.send_file(d, event.message.media, caption=event.text)
-                else:
-                    await client.send_message(d, event.text)
-
-                STATS[b]["destinations"].setdefault(str(d), 0)
-                STATS[b]["destinations"][str(d)] += 1
-
 # ================= ADMIN TEXT =================
 @admin_bot.on(events.NewMessage)
 async def admin_text(event):
@@ -222,8 +211,10 @@ async def admin_text(event):
         await event.reply("🛠 ADMIN PANEL", buttons=panel())
         return
 
-    b = STATE.get("selected_bot")
-    m = STATE.get("mode")
+    b = STATE["selected_bot"]
+    m = STATE["mode"]
+    if not b:
+        return
 
     if m == "add_bot":
         u, i = event.text.split()
@@ -243,23 +234,21 @@ async def admin_text(event):
         STATE["selected_bot"] = key
         STATE["mode"] = None
         await event.reply("✅ Bot added", buttons=panel())
-        return
 
-    if not b:
-        return
-
-    if m == "add_src":
+    elif m == "add_src":
         cid = await detect_channel_id(event)
-        CONFIG["bots"][b]["sources"].append(cid)
-        QUEUES[b][str(cid)] = []
+        if cid not in CONFIG["bots"][b]["sources"]:
+            CONFIG["bots"][b]["sources"].append(cid)
+            QUEUES[b][str(cid)] = []
         save_config(CONFIG)
         STATE["mode"] = None
         await event.reply("✅ Source added", buttons=panel())
 
     elif m == "rm_src":
         cid = int(event.text)
-        CONFIG["bots"][b]["sources"].remove(cid)
-        QUEUES[b].pop(str(cid), None)
+        if cid in CONFIG["bots"][b]["sources"]:
+            CONFIG["bots"][b]["sources"].remove(cid)
+            QUEUES[b].pop(str(cid), None)
         save_config(CONFIG)
         STATE["mode"] = None
         await event.reply("❌ Source removed", buttons=panel())
@@ -298,70 +287,83 @@ async def buttons(event):
     if d == "back":
         STATE["mode"] = None
         await event.edit("🛠 ADMIN PANEL", buttons=panel())
+        return
 
-    elif d == "select_bot":
+    if d == "select_bot":
         rows = [[Button.inline(k, f"sel_{k}".encode())] for k in CONFIG["bots"]]
         rows.append([Button.inline("⬅ Back", b"back")])
         await event.edit("🤖 Select Bot:", buttons=rows)
+        return
 
-    elif d.startswith("sel_"):
+    if d.startswith("sel_"):
         STATE["selected_bot"] = d.replace("sel_", "")
         await event.edit("✅ Bot selected", buttons=panel())
+        return
 
-    elif d == "add_bot":
+    if d == "add_bot":
         STATE["mode"] = "add_bot"
         await event.edit("Send: @BotUsername bot_id", buttons=[[Button.inline("⬅ Back", b"back")]])
+        return
 
-    elif d == "rm_bot":
-        b = STATE.get("selected_bot")
+    if d == "rm_bot":
+        b = STATE["selected_bot"]
         if b:
             CONFIG["bots"].pop(b)
-            QUEUES.pop(b)
-            STATS.pop(b)
+            QUEUES.pop(b, None)
+            STATS.pop(b, None)
             save_config(CONFIG)
             STATE["selected_bot"] = None
         await event.edit("❌ Bot removed", buttons=panel())
+        return
 
-    elif d in ("add_src", "rm_src", "add_dest", "rm_dest", "set_store"):
+    if d in ("add_src", "rm_src", "add_dest", "rm_dest", "set_store"):
         STATE["mode"] = d
         await event.edit("Send input now", buttons=[[Button.inline("⬅ Back", b"back")]])
+        return
 
-    elif d.startswith("b_"):
+    if d.startswith("b_"):
         CONFIG["bots"][STATE["selected_bot"]]["batch"] = int(d.split("_")[1])
         save_config(CONFIG)
         await event.edit("📦 Batch updated", buttons=panel())
+        return
 
-    elif d.startswith("i_"):
+    if d.startswith("i_"):
         CONFIG["bots"][STATE["selected_bot"]]["interval"] = int(d.split("_")[1])
         save_config(CONFIG)
         await event.edit("⏳ Interval updated", buttons=panel())
+        return
 
-    elif d == "as_on":
+    if d == "as_on":
         AUTO_SCALE = True
         await event.edit("🤖 AutoScale ON", buttons=panel())
+        return
 
-    elif d == "as_off":
+    if d == "as_off":
         AUTO_SCALE = False
         await event.edit("🤖 AutoScale OFF", buttons=panel())
+        return
 
-    elif d == "pause":
+    if d == "pause":
         SYSTEM_PAUSED = True
         await event.edit("⏸ Paused", buttons=panel())
+        return
 
-    elif d == "start":
+    if d == "start":
         SYSTEM_PAUSED = False
         await event.edit("▶ Started", buttons=panel())
+        return
 
-    elif d == "restart":
+    if d == "restart":
         os.execv(sys.executable, ["python"] + sys.argv)
 
-    elif d == "status":
+    if d == "status":
         txt = ["📊 STATUS\n"]
         for b, s in STATS.items():
             txt.append(f"{b}: {s['total']} msgs")
         await event.edit("\n".join(txt), buttons=panel())
+        return
 
-    elif d == "traffic":
+    if d == "traffic":
         txt = ["📈 TRAFFIC\n"]
         for b, data in STATS.items():
             txt.append(f"🤖 {b}")
@@ -371,6 +373,7 @@ async def buttons(event):
                 txt.append(f"  DEST {d2}: {c2}")
             txt.append("")
         await event.edit("\n".join(txt), buttons=panel())
+        return
 
 # ================= START =================
 async def main():
@@ -380,7 +383,7 @@ async def main():
     for b in CONFIG["bots"]:
         asyncio.create_task(worker(b))
 
-    print("✅ SYSTEM RUNNING (FULL + BACK BUTTON ENABLED)")
+    print("✅ SYSTEM RUNNING (FULL FINAL SINGLE FILE)")
     await asyncio.gather(
         client.run_until_disconnected(),
         admin_bot.run_until_disconnected()
