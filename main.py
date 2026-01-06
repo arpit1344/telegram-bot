@@ -9,18 +9,13 @@ API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
 
-# ================= CONFIG =================
+# ================= FILES =================
 CONFIG_FILE = "config.json"
 LOG_DIR = "logs"
 LOG_FILE = f"{LOG_DIR}/admin_activity.log"
-
 os.makedirs(LOG_DIR, exist_ok=True)
 
-def log_action(admin_id, action, detail=""):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(LOG_FILE, "a") as f:
-        f.write(f"[{ts}] admin:{admin_id} | {action} | {detail}\n")
-
+# ================= CONFIG =================
 def load_config():
     with open(CONFIG_FILE) as f:
         return json.load(f)
@@ -31,7 +26,13 @@ def save_config(cfg):
 
 CONFIG = load_config()
 ADMINS = set(CONFIG.get("admins", []))
-SUPER_ADMIN = list(ADMINS)[0]   # first admin = super admin
+SUPER_ADMIN = list(ADMINS)[0]
+
+# ================= LOG =================
+def log_action(admin, action, detail=""):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with open(LOG_FILE, "a") as f:
+        f.write(f"[{ts}] admin:{admin} | {action} | {detail}\n")
 
 # ================= CLIENTS =================
 client = TelegramClient("main_session", API_ID, API_HASH)
@@ -39,9 +40,12 @@ admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
 
 # ================= RUNTIME =================
 SYSTEM_PAUSED = False
+AUTO_SCALE = True
+
 QUEUES = {}
 STATS = {}
 
+# 🔥 MULTI USER STATE (CORE FIX)
 USER_STATE = {}
 
 def get_state(uid):
@@ -59,45 +63,107 @@ def init_runtime():
     STATS.clear()
     for b, bot in CONFIG["bots"].items():
         QUEUES[b] = {}
-        STATS[b] = {"total": 0}
+        STATS[b] = {"total": 0, "sources": {}, "destinations": {}}
         for s in bot.get("sources", []):
             QUEUES[b][str(s)] = []
 
 init_runtime()
 
-# ================= BOT VISIBILITY =================
-def get_admin_bots(admin_id):
-    if admin_id == SUPER_ADMIN:
+# ================= UTIL =================
+async def detect_channel_id(event):
+    if event.forward and event.forward.chat:
+        return event.forward.chat.id
+
+    text = (event.text or "").strip()
+    if not text:
+        return None
+
+    if text.startswith("-100"):
+        return int(text)
+
+    if text.startswith("@"):
+        e = await client.get_entity(text)
+        return e.id
+
+    if "t.me/" in text:
+        u = text.split("t.me/")[-1]
+        e = await client.get_entity(u)
+        return e.id
+
+    return None
+
+def visible_bots(admin):
+    if admin == SUPER_ADMIN:
         return CONFIG["bots"]
-    return {
-        k: v for k, v in CONFIG["bots"].items()
-        if v.get("owner") == admin_id
-    }
+    return {k:v for k,v in CONFIG["bots"].items() if v.get("owner") == admin}
 
 # ================= PANEL =================
-def panel(state, admin_id):
-    bots = get_admin_bots(admin_id)
+def panel(state, admin):
     sel = state["selected_bot"] or "None"
+    bot_selected = state["selected_bot"] is not None
 
     def safe(btn):
-        return btn if state["selected_bot"] else Button.inline("🚫 Select bot", b"noop")
+        return btn if bot_selected else Button.inline("🚫 Select bot", b"noop")
 
     return [
-        [Button.inline(f"🤖 Select Bot ({sel})", b"select_bot")],
-        [Button.inline("➕ Add Bot", b"add_bot"),
+        [Button.inline(f"🤖 Select Bot ({sel})", b"select_bot"),
+         Button.inline("➕ Add Bot", b"add_bot"),
          Button.inline("❌ Remove Bot", b"rm_bot")],
+
+        [Button.inline("⬆ Priority", b"bot_up"),
+         Button.inline("⬇ Priority", b"bot_down")],
+
         [safe(Button.inline("🗃 Set Store Channel", b"set_store"))],
+
         [safe(Button.inline("➕ Add Source", b"add_src")),
          safe(Button.inline("❌ Remove Source", b"rm_src"))],
+
         [safe(Button.inline("➕ Add Dest", b"add_dest")),
          safe(Button.inline("❌ Remove Dest", b"rm_dest"))],
+
         [Button.inline("📊 Status", b"status"),
-         Button.inline("📜 My Activity Log", b"my_log")],
+         Button.inline("📈 Traffic", b"traffic")],
+
+        [Button.inline("🤖 AutoScale ON", b"as_on"),
+         Button.inline("🤖 AutoScale OFF", b"as_off")],
+
         [Button.inline("⏸ Pause", b"pause"),
-         Button.inline("▶ Start", b"start")],
-        [Button.inline("♻ Restart", b"restart"),
+         Button.inline("▶ Start", b"start"),
+         Button.inline("♻ Restart", b"restart")],
+
+        [Button.inline("📜 My Activity Log", b"my_log"),
          Button.inline("⬅ Back", b"back")]
     ]
+
+# ================= SOURCE LISTENER =================
+@client.on(events.NewMessage)
+async def collect(event):
+    for b, bot in CONFIG["bots"].items():
+        if event.chat_id in bot.get("sources", []):
+            QUEUES[b][str(event.chat_id)].append(event.message)
+
+# ================= WORKER =================
+async def worker(bot_key):
+    while True:
+        if SYSTEM_PAUSED:
+            await asyncio.sleep(2)
+            continue
+
+        bot = CONFIG["bots"][bot_key]
+        sent = 0
+
+        for src, q in QUEUES[bot_key].items():
+            while q and sent < bot.get("batch", 10):
+                msg = q.pop(0)
+                await client.send_message(bot["username"], msg.text or "")
+                STATS[bot_key]["total"] += 1
+                STATS[bot_key]["sources"].setdefault(src, 0)
+                STATS[bot_key]["sources"][src] += 1
+                sent += 1
+
+        if sent:
+            await asyncio.sleep(bot.get("interval", 1800))
+        await asyncio.sleep(1)
 
 # ================= ADMIN TEXT =================
 @admin_bot.on(events.NewMessage)
@@ -109,29 +175,28 @@ async def admin_text(event):
     state = get_state(uid)
 
     if event.text == "/panel":
-        await event.reply(
-            "🛠 ADMIN PANEL",
-            buttons=panel(state, uid)
-        )
+        state["mode"] = None
+        await event.reply("🛠 ADMIN PANEL", buttons=panel(state, uid))
 
     if state["mode"] == "add_bot":
         u, i = event.text.split()
         key = f"bot{len(CONFIG['bots'])+1}"
         CONFIG["bots"][key] = {
+            "owner": uid,
             "username": u,
             "id": int(i),
-            "owner": uid,
             "sources": [],
             "destinations": [],
             "batch": 10,
             "interval": 1800
         }
         save_config(CONFIG)
+        init_runtime()
         log_action(uid, "ADD_BOT", key)
         state["mode"] = None
         await event.reply("✅ Bot added", buttons=panel(state, uid))
 
-# ================= BUTTON HANDLER =================
+# ================= BUTTONS =================
 @admin_bot.on(events.CallbackQuery)
 async def buttons(event):
     uid = event.sender_id
@@ -140,8 +205,7 @@ async def buttons(event):
 
     state = get_state(uid)
     d = event.data.decode()
-
-    bots = get_admin_bots(uid)
+    bots = visible_bots(uid)
 
     if d == "noop":
         await event.answer("Select bot first", alert=True)
@@ -168,6 +232,7 @@ async def buttons(event):
         if b:
             CONFIG["bots"].pop(b)
             save_config(CONFIG)
+            init_runtime()
             log_action(uid, "REMOVE_BOT", b)
             state["selected_bot"] = None
         await event.edit("❌ Bot removed", buttons=panel(state, uid))
@@ -178,17 +243,32 @@ async def buttons(event):
             return
         with open(LOG_FILE) as f:
             lines = [l for l in f.readlines() if f"admin:{uid}" in l][-20:]
-        await event.edit("📜 Your Activity Log\n\n" + "".join(lines), buttons=panel(state, uid))
+        await event.edit("📜 Your Activity Log\n\n" + "".join(lines),
+                         buttons=[[Button.inline("⬅ Back", b"back")]])
+
+    elif d == "pause":
+        SYSTEM_PAUSED = True
+        log_action(uid, "PAUSE_SYSTEM")
+        await event.edit("⏸ Paused", buttons=panel(state, uid))
+
+    elif d == "start":
+        SYSTEM_PAUSED = False
+        log_action(uid, "START_SYSTEM")
+        await event.edit("▶ Started", buttons=panel(state, uid))
 
     elif d == "restart":
-        log_action(uid, "SYSTEM_RESTART")
+        log_action(uid, "RESTART_SYSTEM")
         os.execv(sys.executable, ["python"] + sys.argv)
 
 # ================= START =================
 async def main():
     await client.start()
     await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
-    print("✅ SYSTEM RUNNING (MULTI-ADMIN + ISOLATION + LOGGING)")
+
+    for b in CONFIG["bots"]:
+        asyncio.create_task(worker(b))
+
+    print("✅ SYSTEM RUNNING (FULL FEATURES + ISOLATION + LOGS)")
     await asyncio.gather(
         client.run_until_disconnected(),
         admin_bot.run_until_disconnected()
