@@ -1,6 +1,7 @@
 import os, json, asyncio, sys
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
+from telethon.tl.types import MessageMediaWebPage
 
 # ================= ENV =================
 load_dotenv("/home/ubuntu/telegram-bot/.env")
@@ -31,8 +32,8 @@ admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
 SYSTEM_PAUSED = False
 AUTO_SCALE = True
 
-QUEUES = {}   # { bot_key: { source_id: [messages] } }
-STATS = {}    # traffic stats
+QUEUES = {}
+STATS = {}
 
 STATE = {
     "selected_bot": None,
@@ -96,53 +97,42 @@ def auto_scale(bot_key):
 def panel():
     sel = STATE["selected_bot"] or "None"
     return [
-        [
-            Button.inline(f"🤖 Select Bot ({sel})", b"select_bot"),
-            Button.inline("➕ Add Bot", b"add_bot"),
-            Button.inline("❌ Remove Bot", b"rm_bot")
-        ],
-        [
-            Button.inline("🗃 Set Store Channel", b"set_store")
-        ],
-        [
-            Button.inline("➕ Add Source", b"add_src"),
-            Button.inline("❌ Remove Source", b"rm_src")
-        ],
-        [
-            Button.inline("➕ Add Dest", b"add_dest"),
-            Button.inline("❌ Remove Dest", b"rm_dest")
-        ],
-        [
-            Button.inline("📦 5", b"b_5"),
-            Button.inline("📦 10", b"b_10"),
-            Button.inline("📦 20", b"b_20"),
-            Button.inline("📦 50", b"b_50")
-        ],
-        [
-            Button.inline("⏳ 5m", b"i_300"),
-            Button.inline("⏳ 10m", b"i_600"),
-            Button.inline("⏳ 30m", b"i_1800"),
-            Button.inline("⏳ 60m", b"i_3600")
-        ],
-        [
-            Button.inline("🤖 AutoScale ON", b"as_on"),
-            Button.inline("🤖 AutoScale OFF", b"as_off")
-        ],
-        [
-            Button.inline("⏸ Pause", b"pause"),
-            Button.inline("▶ Start", b"start"),
-            Button.inline("♻ Restart", b"restart")
-        ],
-        [
-            Button.inline("📊 Status", b"status"),
-            Button.inline("📈 Traffic", b"traffic")
-        ],
-        [
-            Button.inline("⬅ Back", b"back")
-        ]
+        [Button.inline(f"🤖 Select Bot ({sel})", b"select_bot"),
+         Button.inline("➕ Add Bot", b"add_bot"),
+         Button.inline("❌ Remove Bot", b"rm_bot")],
+
+        [Button.inline("🗃 Set Store Channel", b"set_store")],
+
+        [Button.inline("➕ Add Source", b"add_src"),
+         Button.inline("❌ Remove Source", b"rm_src")],
+
+        [Button.inline("➕ Add Dest", b"add_dest"),
+         Button.inline("❌ Remove Dest", b"rm_dest")],
+
+        [Button.inline("📦 5", b"b_5"),
+         Button.inline("📦 10", b"b_10"),
+         Button.inline("📦 20", b"b_20"),
+         Button.inline("📦 50", b"b_50")],
+
+        [Button.inline("⏳ 5m", b"i_300"),
+         Button.inline("⏳ 10m", b"i_600"),
+         Button.inline("⏳ 30m", b"i_1800"),
+         Button.inline("⏳ 60m", b"i_3600")],
+
+        [Button.inline("🤖 AutoScale ON", b"as_on"),
+         Button.inline("🤖 AutoScale OFF", b"as_off")],
+
+        [Button.inline("⏸ Pause", b"pause"),
+         Button.inline("▶ Start", b"start"),
+         Button.inline("♻ Restart", b"restart")],
+
+        [Button.inline("📊 Status", b"status"),
+         Button.inline("📈 Traffic", b"traffic")],
+
+        [Button.inline("⬅ Back", b"back")]
     ]
 
-# ================= SINGLE MESSAGE ROUTER =================
+# ================= MESSAGE ROUTER =================
 @client.on(events.NewMessage)
 async def message_router(event):
 
@@ -160,20 +150,21 @@ async def message_router(event):
             store = bot.get("store_channel")
             if not store:
                 return
-            if event.message.media:
+
+            if event.message.media and not isinstance(event.message.media, MessageMediaWebPage):
                 await client.send_file(store, event.message.media, caption=event.text)
             else:
-                await client.send_message(store, event.text)
+                await client.send_message(store, event.text or "")
             return
 
     # STORE → DEST
     for b, bot in CONFIG["bots"].items():
         if event.chat_id == bot.get("store_channel"):
             for d in bot.get("destinations", []):
-                if event.message.media:
+                if event.message.media and not isinstance(event.message.media, MessageMediaWebPage):
                     await client.send_file(d, event.message.media, caption=event.text)
                 else:
-                    await client.send_message(d, event.text)
+                    await client.send_message(d, event.text or "")
 
                 STATS[b]["destinations"].setdefault(str(d), 0)
                 STATS[b]["destinations"][str(d)] += 1
@@ -187,7 +178,6 @@ async def worker(bot_key):
             continue
 
         bot = CONFIG["bots"][bot_key]
-
         if AUTO_SCALE:
             auto_scale(bot_key)
 
@@ -196,10 +186,10 @@ async def worker(bot_key):
             while q and sent < bot.get("batch", 10):
                 msg = q.pop(0)
 
-                if msg.media:
+                if msg.media and not isinstance(msg.media, MessageMediaWebPage):
                     await client.send_file(bot["username"], msg.media, caption=msg.text)
                 else:
-                    await client.send_message(bot["username"], msg.text)
+                    await client.send_message(bot["username"], msg.text or "")
 
                 STATS[bot_key]["total"] += 1
                 STATS[bot_key]["sources"].setdefault(src, 0)
@@ -396,7 +386,7 @@ async def main():
     for b in CONFIG["bots"]:
         asyncio.create_task(worker(b))
 
-    print("✅ SYSTEM RUNNING (FINAL – STORE VIA PANEL)")
+    print("✅ SYSTEM RUNNING (FINAL – WEBPAGE SAFE)")
     await asyncio.gather(
         client.run_until_disconnected(),
         admin_bot.run_until_disconnected()
