@@ -1,12 +1,14 @@
-import os, sys, json
+import os, sys, json, asyncio
 from telethon import TelegramClient, events, Button
 from dotenv import load_dotenv
 
 from core.panel import admin_panel
-from state import STATE                         # Phase 2
-from admin.state import get_state               # NEW
-from admin.isolation import visible_bots        # NEW
-from admin.logs import log_action               # NEW
+from state import STATE
+from admin.state import get_state
+from admin.isolation import visible_bots
+from admin.logs import log_action
+from workers import init_queues, QUEUES, worker_loop
+from store_flow import bot_to_store, store_to_dest
 
 # ===== ENV =====
 load_dotenv("/home/ubuntu/telegram-bot/.env")
@@ -28,10 +30,34 @@ CONFIG = load_config()
 ADMINS = set(CONFIG.get("admins", []))
 
 # ===== CLIENT =====
-bot = TelegramClient("admin_panel_bot", API_ID, API_HASH)
+client = TelegramClient("main_session", API_ID, API_HASH)
+admin_bot = TelegramClient("admin_panel_bot", API_ID, API_HASH)
+
+# ===== STATS =====
+STATS = { b: {"total": 0, "sources": {}, "destinations": {}} for b in CONFIG["bots"] }
+
+# ===== INIT =====
+init_queues(CONFIG)
+
+# ===== SOURCE COLLECTOR =====
+@client.on(events.NewMessage)
+async def collect_source(event):
+    for b, bot in CONFIG["bots"].items():
+        if event.chat_id in bot.get("sources", []):
+            QUEUES[b][str(event.chat_id)].append(event.message)
+
+# ===== BOT → STORE =====
+@client.on(events.NewMessage)
+async def on_bot_message(event):
+    await bot_to_store(client, CONFIG, event)
+
+# ===== STORE → DEST =====
+@client.on(events.NewMessage)
+async def on_store_message(event):
+    await store_to_dest(client, CONFIG, STATS, event)
 
 # ===== /panel =====
-@bot.on(events.NewMessage(pattern="/panel"))
+@admin_bot.on(events.NewMessage(pattern="/panel"))
 async def show_panel(event):
     if event.sender_id not in ADMINS:
         return
@@ -39,7 +65,7 @@ async def show_panel(event):
     await event.reply(panel_status_text(), buttons=admin_panel())
 
 # ===== BUTTON HANDLER =====
-@bot.on(events.CallbackQuery)
+@admin_bot.on(events.CallbackQuery)
 async def handle_buttons(event):
     uid = event.sender_id
     if uid not in ADMINS:
@@ -48,13 +74,11 @@ async def handle_buttons(event):
     state = get_state(uid)
     data = event.data.decode()
 
-    # ---- BACK ----
     if data == "back":
         state["mode"] = None
         await event.edit(panel_status_text(), buttons=admin_panel())
         return
 
-    # ---- SELECT BOT (ISOLATED LIST) ----
     if data == "select_bot":
         bots = visible_bots(CONFIG, uid)
         rows = [[Button.inline(k, f"sel_{k}".encode())] for k in bots]
@@ -67,7 +91,7 @@ async def handle_buttons(event):
         await event.edit(panel_status_text(), buttons=admin_panel())
         return
 
-    # ---- PAUSE / START ----
+    # Pause / Start
     if data == "pause":
         STATE["paused"] = True
         log_action(uid, "PAUSE_SYSTEM")
@@ -80,7 +104,19 @@ async def handle_buttons(event):
         await event.edit(panel_status_text(), buttons=admin_panel())
         return
 
-    # ---- AUTOSCALE ----
+    # Batch / Interval / Autoscale
+    if data.startswith("batch_"):
+        STATE["batch"] = int(data.split("_")[1])
+        log_action(uid, "SET_BATCH", STATE["batch"])
+        await event.answer(f"Batch {STATE['batch']}", alert=True)
+        return
+
+    if data.startswith("int_"):
+        STATE["interval"] = int(data.split("_")[1])
+        log_action(uid, "SET_INTERVAL", STATE["interval"])
+        await event.answer(f"Interval {STATE['interval']}s", alert=True)
+        return
+
     if data == "as_on":
         STATE["autoscale"] = True
         log_action(uid, "AUTOSCALE_ON")
@@ -93,37 +129,18 @@ async def handle_buttons(event):
         await event.answer("AutoScale OFF", alert=True)
         return
 
-    # ---- BATCH ----
-    if data.startswith("batch_"):
-        STATE["batch"] = int(data.split("_")[1])
-        log_action(uid, "SET_BATCH", STATE["batch"])
-        await event.answer(f"Batch set to {STATE['batch']}", alert=True)
-        return
-
-    # ---- INTERVAL ----
-    if data.startswith("int_"):
-        STATE["interval"] = int(data.split("_")[1])
-        log_action(uid, "SET_INTERVAL", STATE["interval"])
-        await event.answer(f"Interval set to {STATE['interval']} sec", alert=True)
-        return
-
-    # ---- RESTART CONFIRM ----
     if data == "restart":
         state["confirm"] = "restart"
         await event.edit(
             "♻ Restart system?\n\nAre you sure?",
-            buttons=[
-                [Button.inline("✅ Yes", b"confirm_restart"),
-                 Button.inline("❌ No", b"back")]
-            ]
+            buttons=[[Button.inline("✅ Yes", b"confirm_restart"),
+                      Button.inline("❌ No", b"back")]]
         )
         return
 
     if data == "confirm_restart":
         log_action(uid, "RESTART_SYSTEM")
         os.execv(sys.executable, ["python"] + sys.argv)
-
-    await event.answer(f"Clicked: {data}", alert=True)
 
 # ===== STATUS TEXT =====
 def panel_status_text():
@@ -137,8 +154,15 @@ def panel_status_text():
 
 # ===== START =====
 async def main():
-    await bot.start(bot_token=ADMIN_BOT_TOKEN)
-    print("✅ PHASE 3 RUNNING (Multi-Admin + Isolation + Logs)")
-    await bot.run_until_disconnected()
+    await client.start()
+    await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
 
-bot.loop.run_until_complete(main())
+    asyncio.create_task(worker_loop(client, CONFIG, STATE, STATS))
+    print("✅ PHASE 4 RUNNING (REAL PIPELINE ACTIVE)")
+
+    await asyncio.gather(
+        client.run_until_disconnected(),
+        admin_bot.run_until_disconnected()
+    )
+
+client.loop.run_until_complete(main())
