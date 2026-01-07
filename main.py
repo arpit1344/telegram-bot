@@ -1,4 +1,4 @@
-import os, json, asyncio, sys, time
+import os, json, asyncio, sys, time, hashlib
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
 from telethon.errors import MessageNotModifiedError
@@ -9,7 +9,6 @@ load_dotenv("/home/ubuntu/telegram-bot/.env")
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 # ================= CONFIG =================
 CONFIG_FILE = "config.json"
@@ -35,13 +34,12 @@ AUTO_SCALE = True
 
 QUEUES = {}
 STATS = {}
-STATE = {"selected_bot": None, "mode": None}
+STATE = {"selected_bot": None}
 
-# debounce: {(user_id, button): last_time}
 DEBOUNCE = {}
-
-# auto refresh tasks
-AUTO_TASKS = {}   # {"status": task, "traffic": task}
+REFRESH_TASK = None
+LAST_HASH = None
+SHUTTING_DOWN = False
 
 # ================= INIT =================
 def init_runtime():
@@ -55,121 +53,73 @@ def init_runtime():
 
 init_runtime()
 
-# ================= UTIL =================
-async def detect_channel_id(event):
-    if event.forward and event.forward.chat:
-        return event.forward.chat.id
-
-    text = (event.text or "").strip()
-
-    if text.startswith("-100"):
-        return int(text)
-
-    if text.startswith("@"):
-        e = await client.get_entity(text)
-        return e.id
-
-    if "t.me/" in text:
-        u = text.split("t.me/")[-1]
-        e = await client.get_entity(u)
-        return e.id
-
-    return None
-
-def debounce_ok(user_id, key, gap=1.0):
+# ================= UTILS =================
+def debounce_ok(uid, key, gap=1.0):
     now = time.time()
-    last = DEBOUNCE.get((user_id, key), 0)
+    last = DEBOUNCE.get((uid, key), 0)
     if now - last < gap:
         return False
-    DEBOUNCE[(user_id, key)] = now
+    DEBOUNCE[(uid, key)] = now
     return True
 
-async def safe_edit(event, text, buttons=None):
+def hash_text(text):
+    return hashlib.md5(text.encode()).hexdigest()
+
+async def smart_edit(event, text, buttons=None):
+    global LAST_HASH
+    h = hash_text(text)
+    if h == LAST_HASH:
+        return
+    LAST_HASH = h
     try:
         await event.edit(text, buttons=buttons)
     except MessageNotModifiedError:
         pass
-    except Exception as e:
-        print("EDIT ERROR:", e)
 
-# ================= AUTOSCALE =================
-def auto_scale(bot_key):
-    if not AUTO_SCALE:
-        return
-    total_q = sum(len(q) for q in QUEUES[bot_key].values())
-    bot = CONFIG["bots"][bot_key]
+def queue_bar(n):
+    return "█" * min(10, n)
 
-    if total_q > 100:
-        bot["batch"] = 50
-        bot["interval"] = 300
-    elif total_q > 20:
-        bot["batch"] = 20
-        bot["interval"] = 600
-    else:
-        bot.setdefault("batch", 10)
-        bot.setdefault("interval", 1800)
+def stop_refresh():
+    global REFRESH_TASK
+    if REFRESH_TASK:
+        REFRESH_TASK.cancel()
+        REFRESH_TASK = None
 
 # ================= PANEL =================
 def panel():
     sel = STATE.get("selected_bot") or "None"
     return [
-        [Button.inline(f"🤖 Bot ({sel})", b"select_bot"),
-         Button.inline("➕ Add Bot", b"add_bot"),
-         Button.inline("❌ Remove Bot", b"rm_bot")],
-
-        [Button.inline("➕ Add Source", b"add_src"),
-         Button.inline("❌ Remove Source", b"rm_src")],
-
-        [Button.inline("📦 Add Store", b"add_store"),
-         Button.inline("❌ Remove Store", b"rm_store")],
-
-        [Button.inline("➕ Add Dest", b"add_dest"),
-         Button.inline("❌ Remove Dest", b"rm_dest")],
-
+        [Button.inline(f"🤖 Bot ({sel})", b"select_bot")],
         [Button.inline("📊 Status", b"status"),
          Button.inline("📈 Traffic", b"traffic")],
-
-        [Button.inline("📦 5", b"b_5"),
-         Button.inline("📦 10", b"b_10"),
-         Button.inline("📦 20", b"b_20"),
-         Button.inline("📦 50", b"b_50")],
-
-        [Button.inline("⏳ 5m", b"i_300"),
-         Button.inline("⏳ 10m", b"i_600"),
-         Button.inline("⏳ 30m", b"i_1800")],
-
-        [Button.inline("🤖 AutoScale ON", b"as_on"),
-         Button.inline("🤖 AutoScale OFF", b"as_off")],
-
         [Button.inline("⏸ Pause", b"pause"),
-         Button.inline("▶ Start", b"start"),
-         Button.inline("♻ Restart", b"restart")]
+         Button.inline("▶ Start", b"start")],
+        [Button.inline("🚀 Zero Restart", b"zrestart")]
     ]
 
 # ================= AUTO REFRESH =================
-async def auto_refresh(event, mode):
+async def refresh_loop(event, mode):
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
+
         if mode == "status":
             lines = ["📊 STATUS\n"]
             for b, bot in CONFIG["bots"].items():
                 lines.append(f"🤖 {b} ({bot['username']})")
-                lines.append(f" Batch:{bot.get('batch')} Interval:{bot.get('interval')}")
-                lines.append(f" Store:{bot.get('store_channels', [])}")
                 for s in bot.get("sources", []):
-                    lines.append(f"  • {s} | Q:{len(QUEUES[b].get(str(s), []))}")
+                    q = len(QUEUES[b].get(str(s), []))
+                    lines.append(f" {s} | {queue_bar(q)} {q}")
                 lines.append("")
-            await safe_edit(event, "\n".join(lines), panel())
+            await smart_edit(event, "\n".join(lines), panel())
 
         elif mode == "traffic":
             lines = ["📈 TRAFFIC\n"]
             for b, data in STATS.items():
                 lines.append(f"🤖 {b} Total:{data['total']}")
                 for s, c in data["sources"].items():
-                    bars = "█" * min(10, c // 5)
-                    lines.append(f"  {s}: {bars} ({c})")
+                    lines.append(f" {s}: {queue_bar(c//5)} {c}")
                 lines.append("")
-            await safe_edit(event, "\n".join(lines), panel())
+            await smart_edit(event, "\n".join(lines), panel())
 
 # ================= SOURCE LISTENER =================
 @client.on(events.NewMessage)
@@ -180,16 +130,13 @@ async def collect(event):
 
 # ================= WORKER =================
 async def worker(bot_key):
-    while True:
+    while not SHUTTING_DOWN:
         if SYSTEM_PAUSED:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
             continue
 
-        auto_scale(bot_key)
         bot = CONFIG["bots"][bot_key]
-
         batch = bot.get("batch", 10)
-        interval = bot.get("interval", 1800)
         sent = 0
 
         for src, q in QUEUES[bot_key].items():
@@ -202,14 +149,10 @@ async def worker(bot_key):
                         await client.send_message(bot["username"], msg.text)
                 except:
                     pass
-
                 STATS[bot_key]["total"] += 1
                 STATS[bot_key]["sources"].setdefault(src, 0)
                 STATS[bot_key]["sources"][src] += 1
                 sent += 1
-
-        if sent >= batch:
-            await asyncio.sleep(interval)
 
         await asyncio.sleep(1)
 
@@ -220,82 +163,51 @@ async def bot_reply(event):
         if event.sender_id == bot["id"]:
             for sc in bot.get("store_channels", []):
                 try:
-                    if event.message.media:
-                        await client.send_file(sc, event.message.media, caption=event.text)
-                    else:
-                        await client.send_message(sc, event.text)
+                    await client.send_message(sc, event.text or "")
                 except:
                     pass
 
-# ================= STORE → DEST =================
-@client.on(events.NewMessage)
-async def store_forward(event):
-    for bot in CONFIG["bots"].values():
-        if event.chat_id in bot.get("store_channels", []):
-            for d in bot.get("destinations", []):
-                try:
-                    if event.message.media:
-                        await client.send_file(d, event.message.media, caption=event.text)
-                    else:
-                        await client.send_message(d, event.text)
-                except:
-                    pass
-
-# ================= ADMIN TEXT =================
+# ================= ADMIN =================
 @admin_bot.on(events.NewMessage)
 async def admin_text(event):
-    if event.sender_id not in ADMINS or not event.text:
+    if event.sender_id not in ADMINS:
         return
-
     if event.text == "/panel":
         await event.reply("🛠 ADMIN PANEL", buttons=panel())
-        return
 
 # ================= BUTTONS =================
 @admin_bot.on(events.CallbackQuery)
 async def buttons(event):
-    global SYSTEM_PAUSED, AUTO_SCALE
+    global SYSTEM_PAUSED, REFRESH_TASK, SHUTTING_DOWN
 
     if event.sender_id not in ADMINS:
         return
 
     d = event.data.decode()
-
     if not debounce_ok(event.sender_id, d):
         return
 
-    # stop previous auto refresh
-    for t in AUTO_TASKS.values():
-        t.cancel()
-    AUTO_TASKS.clear()
+    stop_refresh()
 
     if d == "status":
-        AUTO_TASKS["status"] = asyncio.create_task(auto_refresh(event, "status"))
+        REFRESH_TASK = asyncio.create_task(refresh_loop(event, "status"))
 
     elif d == "traffic":
-        AUTO_TASKS["traffic"] = asyncio.create_task(auto_refresh(event, "traffic"))
+        REFRESH_TASK = asyncio.create_task(refresh_loop(event, "traffic"))
 
     elif d == "pause":
         SYSTEM_PAUSED = True
-        await safe_edit(event, "⏸ Paused", panel())
+        await smart_edit(event, "⏸ Paused", panel())
 
     elif d == "start":
         SYSTEM_PAUSED = False
-        await safe_edit(event, "▶ Started", panel())
+        await smart_edit(event, "▶ Started", panel())
 
-    elif d == "as_on":
-        AUTO_SCALE = True
-        await safe_edit(event, "AutoScale ON", panel())
-
-    elif d == "as_off":
-        AUTO_SCALE = False
-        await safe_edit(event, "AutoScale OFF", panel())
-
-    elif d == "restart":
+    elif d == "zrestart":
+        SHUTTING_DOWN = True
+        await smart_edit(event, "🚀 Restarting safely…", panel())
+        await asyncio.sleep(2)
         os.execv(sys.executable, ["python"] + sys.argv)
-
-    else:
-        await safe_edit(event, "Updated", panel())
 
 # ================= START =================
 async def main():
@@ -305,7 +217,7 @@ async def main():
     for b in CONFIG["bots"]:
         asyncio.create_task(worker(b))
 
-    print("✅ SYSTEM RUNNING")
+    print("✅ SYSTEM RUNNING (HARDENED)")
     await asyncio.gather(
         client.run_until_disconnected(),
         admin_bot.run_until_disconnected()
