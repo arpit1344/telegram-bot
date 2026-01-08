@@ -144,22 +144,20 @@ async def message_router(event):
             QUEUES[b][str(event.chat_id)].append(event.message)
             return
 
-    # BOT → STORE
+    # BOT → STORE → DESTINATION (FIXED INDENT)
     for b, bot in CONFIG["bots"].items():
         if event.sender_id == bot["id"]:
             store = bot.get("store_channel")
             if not store:
                 return
 
+            # send to store
             if event.message.media and not isinstance(event.message.media, MessageMediaWebPage):
                 await client.send_file(store, event.message.media, caption=event.text)
             else:
                 await client.send_message(store, event.text or "")
-            break
 
-    # STORE → DEST
-    for b, bot in CONFIG["bots"].items():
-        if event.chat_id == bot.get("store_channel"):
+            # STORE → DESTINATION (DIRECT)
             for d in bot.get("destinations", []):
                 if event.message.media and not isinstance(event.message.media, MessageMediaWebPage):
                     await client.send_file(d, event.message.media, caption=event.text)
@@ -168,6 +166,7 @@ async def message_router(event):
 
                 STATS[b]["destinations"].setdefault(str(d), 0)
                 STATS[b]["destinations"][str(d)] += 1
+
             return
 
 # ================= WORKER =================
