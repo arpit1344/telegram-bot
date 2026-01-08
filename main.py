@@ -359,7 +359,7 @@ async def buttons(event):
     if d == "restart":
         os.execv(sys.executable, ["python"] + sys.argv)
 
-        if d == "status":
+    if d == "status":
         b = STATE.get("selected_bot")
 
         if not b or b not in CONFIG["bots"]:
@@ -405,19 +405,55 @@ async def buttons(event):
         await event.edit("\n".join(lines), buttons=panel())
         return
 
+if d == "traffic":
+    b = STATE.get("selected_bot")
 
-
-    if d == "traffic":
-        txt = ["📈 TRAFFIC\n"]
-        for b, data in STATS.items():
-            txt.append(f"🤖 {b}")
-            for s, c in data["sources"].items():
-                txt.append(f"  SRC {s}: {c}")
-            for d2, c2 in data["destinations"].items():
-                txt.append(f"  DEST {d2}: {c2}")
-            txt.append("")
-        await event.edit("\n".join(txt), buttons=panel())
+    if not b or b not in CONFIG["bots"]:
+        await event.edit("❗ Please select a bot first", buttons=panel())
         return
+
+    bot = CONFIG["bots"][b]
+    stats = STATS.get(b, {})
+
+    def bar(count, scale=5, max_len=10):
+        blocks = min(max_len, count // scale)
+        return "█" * blocks + "▌" * (1 if count % scale >= scale//2 else 0)
+
+    lines = [
+        "📈 LIVE TRAFFIC GRAPH\n",
+        f"🤖 {b} ({bot.get('username')})",
+        "",
+        "📥 Sources:"
+    ]
+
+    if not bot.get("sources"):
+        lines.append("  (none)")
+    else:
+        for s in bot.get("sources", []):
+            c = stats.get("sources", {}).get(str(s), 0)
+            lines.append(f" {s} | {bar(c)}  {c}")
+
+    lines.append("")
+    lines.append("📤 Destinations:")
+
+    if not bot.get("destinations"):
+        lines.append("  (none)")
+    else:
+        for d2 in bot.get("destinations", []):
+            c = stats.get("destinations", {}).get(str(d2), 0)
+            lines.append(f" {d2} | {bar(c)}  {c}")
+
+    lines.extend([
+        "",
+        f"📊 Total Throughput: {stats.get('total', 0)} msgs",
+        "",
+        f"⏱ Interval: {bot.get('interval')}s | 📦 Batch: {bot.get('batch')}",
+        f"⚙ AutoScale: {'ON' if AUTO_SCALE else 'OFF'} | ⏸ Paused: {'YES' if SYSTEM_PAUSED else 'NO'}"
+    ])
+
+    await event.edit("\n".join(lines), buttons=panel())
+    return
+
 
 # ================= START =================
 async def main():
@@ -433,4 +469,4 @@ async def main():
         admin_bot.run_until_disconnected()
     )
 
-client.loop.run_until_complete(main())
+client.loop.run_until_complete(main())isme koi problem hai kya
