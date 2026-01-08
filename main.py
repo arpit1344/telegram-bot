@@ -360,11 +360,51 @@ async def buttons(event):
         os.execv(sys.executable, ["python"] + sys.argv)
 
     if d == "status":
-        txt = ["📊 STATUS\n"]
-        for b, s in STATS.items():
-            txt.append(f"{b}: {s['total']} msgs")
-        await event.edit("\n".join(txt), buttons=panel())
+    b = STATE.get("selected_bot")
+
+    if not b or b not in CONFIG["bots"]:
+        await event.edit("❗ Please select a bot first", buttons=panel())
         return
+
+    bot = CONFIG["bots"][b]
+    stats = STATS.get(b, {})
+
+    lines = [
+        "📊 BOT STATUS\n",
+        f"🤖 Bot Key      : {b}",
+        f"👤 Username     : {bot.get('username')}",
+        f"🆔 Bot ID       : {bot.get('id')}",
+        "",
+        f"🗃 Store Channel: {bot.get('store_channel', 'Not set')}",
+        "",
+        f"📥 Sources ({len(bot.get('sources', []))}):"
+    ]
+
+    for s in bot.get("sources", []):
+        count = stats.get("sources", {}).get(str(s), 0)
+        lines.append(f" • {s}  | Forwarded: {count}")
+
+    lines.append("")
+    lines.append(f"📤 Destinations ({len(bot.get('destinations', []))}):")
+
+    for d2 in bot.get("destinations", []):
+        count = stats.get("destinations", {}).get(str(d2), 0)
+        lines.append(f" • {d2}  | Sent: {count}")
+
+    lines.extend([
+        "",
+        f"📨 Total sent to bot     : {stats.get('total', 0)}",
+        f"🤖 Total bot replies    : {stats.get('total', 0)}",
+        "",
+        f"📦 Batch Size           : {bot.get('batch')}",
+        f"⏳ Interval (seconds)   : {bot.get('interval')}",
+        f"⚙ AutoScale            : {'ON' if AUTO_SCALE else 'OFF'}",
+        f"⏸ System Paused        : {'YES' if SYSTEM_PAUSED else 'NO'}"
+    ])
+
+    await event.edit("\n".join(lines), buttons=panel())
+    return
+
 
     if d == "traffic":
         txt = ["📈 TRAFFIC\n"]
