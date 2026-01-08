@@ -404,9 +404,7 @@ async def buttons(event):
 
         await event.edit("\n".join(lines), buttons=panel())
         return
-
-
-   if d == "traffic":
+        if d == "traffic":
     b = STATE.get("selected_bot")
 
     if not b or b not in CONFIG["bots"]:
@@ -454,7 +452,6 @@ async def buttons(event):
 
     await event.edit("\n".join(lines), buttons=panel())
     return
-
 
 # ================= START =================
 async def main():
