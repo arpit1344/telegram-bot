@@ -469,4 +469,4 @@ async def main():
         admin_bot.run_until_disconnected()
     )
 
-client.loop.run_until_complete(main())isme koi problem hai kya
+client.loop.run_until_complete(main())
