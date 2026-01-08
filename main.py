@@ -155,7 +155,7 @@ async def message_router(event):
                 await client.send_file(store, event.message.media, caption=event.text)
             else:
                 await client.send_message(store, event.text or "")
-            return
+            break
 
     # STORE → DEST
     for b, bot in CONFIG["bots"].items():
