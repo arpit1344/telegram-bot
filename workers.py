@@ -1,20 +1,19 @@
 import asyncio
 from redis_queue import pop
 
-
 async def worker(
     bot_key,
     *,
+    wid,
     client,
     CONFIG,
     STATS,
     auto_scale,
-    get_system_paused,
-    get_autoscale
+    is_paused,
+    is_autoscale
 ):
     while True:
-
-        if get_system_paused():
+        if is_paused():
             await asyncio.sleep(1)
             continue
 
@@ -23,7 +22,7 @@ async def worker(
             await asyncio.sleep(5)
             continue
 
-        if get_autoscale():
+        if is_autoscale():
             auto_scale(bot_key)
 
         batch = bot.get("batch", 10)
@@ -45,7 +44,6 @@ async def worker(
                     STATS[bot_key]["total"] += 1
                     STATS[bot_key]["sources"].setdefault(str(src), 0)
                     STATS[bot_key]["sources"][str(src)] += 1
-
                     sent += 1
 
                 except Exception:
