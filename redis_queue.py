@@ -23,6 +23,6 @@ def size(bot, source):
 
 def total(bot):
     total_count = 0
-    for key in r.scan_iter(f"queue:{bot}:*"):
-        total_count += r.llen(key)
+    for k in r.scan_iter(f"queue:{bot}:*"):
+        total_count += r.llen(k)
     return total_count
