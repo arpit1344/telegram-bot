@@ -4,7 +4,6 @@ from redis_queue import pop
 async def worker(
     bot_key,
     *,
-    wid,
     client,
     CONFIG,
     STATS,
@@ -25,9 +24,9 @@ async def worker(
         if is_autoscale():
             auto_scale(bot_key)
 
+        sent = 0
         batch = bot.get("batch", 10)
         interval = bot.get("interval", 1800)
-        sent = 0
 
         for src in bot.get("sources", []):
             while sent < batch:
@@ -35,20 +34,11 @@ async def worker(
                 if not msg:
                     break
 
-                try:
-                    await client.send_message(
-                        bot["username"],
-                        msg.get("text") or ""
-                    )
-
-                    STATS[bot_key]["total"] += 1
-                    STATS[bot_key]["sources"].setdefault(str(src), 0)
-                    STATS[bot_key]["sources"][str(src)] += 1
-                    sent += 1
-
-                except Exception:
-                    await asyncio.sleep(5)
-                    break
+                await client.send_message(bot["username"], msg.get("text") or "")
+                STATS[bot_key]["total"] += 1
+                STATS[bot_key]["sources"].setdefault(str(src), 0)
+                STATS[bot_key]["sources"][str(src)] += 1
+                sent += 1
 
         if sent:
             await asyncio.sleep(interval)
