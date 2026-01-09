@@ -12,12 +12,6 @@ async def worker(
     get_system_paused,
     get_autoscale
 ):
-    """
-    Redis-based worker
-    No circular imports
-    All dependencies injected from main.py
-    """
-
     while True:
 
         if get_system_paused():
