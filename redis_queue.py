@@ -11,8 +11,8 @@ r = redis.Redis(
 def qkey(bot, source):
     return f"queue:{bot}:{source}"
 
-def push(bot, source, message):
-    r.rpush(qkey(bot, source), json.dumps(message))
+def push(bot, source, msg):
+    r.rpush(qkey(bot, source), json.dumps(msg))
 
 def pop(bot, source):
     data = r.lpop(qkey(bot, source))
@@ -21,8 +21,8 @@ def pop(bot, source):
 def size(bot, source):
     return r.llen(qkey(bot, source))
 
-def total_size(bot):
-    total = 0
+def total(bot):
+    total_count = 0
     for key in r.scan_iter(f"queue:{bot}:*"):
-        total += r.llen(key)
-    return total
+        total_count += r.llen(key)
+    return total_count
