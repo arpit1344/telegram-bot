@@ -1,3 +1,4 @@
+from workers import worker
 import os, json, asyncio, sys
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
