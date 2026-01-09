@@ -1,3 +1,195 @@
+import os, json, asyncio, sys, time
+from dotenv import load_dotenv
+from telethon import TelegramClient, events, Button
+from telethon.tl.types import MessageMediaWebPage
+
+# ================= ENV =================
+load_dotenv("/home/ubuntu/telegram-bot/.env")
+
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+ADMIN_BOT_TOKEN = os.getenv("ADMIN_BOT_TOKEN")
+
+CONFIG_FILE = "config.json"
+
+# ================= CONFIG =================
+def load_config():
+    with open(CONFIG_FILE) as f:
+        return json.load(f)
+
+def save_config(cfg):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+CONFIG = load_config()
+ADMINS = set(CONFIG.get("admins", []))
+
+# ================= CLIENTS =================
+client = TelegramClient("main_session", API_ID, API_HASH)
+admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
+
+# ================= RUNTIME =================
+SYSTEM_PAUSED = False
+AUTO_SCALE = True
+
+QUEUES = {}
+STATS = {}
+STATE = {"selected_bot": None, "mode": None}
+
+# ================= QUEUE DISK =================
+def qfile(bot):
+    return f"queue_{bot}.json"
+
+def load_queue(bot):
+    if os.path.exists(qfile(bot)):
+        with open(qfile(bot)) as f:
+            return json.load(f)
+    return {}
+
+def save_queue(bot):
+    with open(qfile(bot), "w") as f:
+        json.dump(QUEUES.get(bot, {}), f)
+
+# ================= INIT =================
+def init_runtime():
+    for b in CONFIG["bots"]:
+        QUEUES[b] = load_queue(b)
+        STATS[b] = {"total": 0, "sources": {}, "destinations": {}}
+
+init_runtime()
+
+# ================= AUTO SCALE =================
+def auto_scale(bot_key):
+    if not AUTO_SCALE:
+        return
+    total_q = sum(len(q) for q in QUEUES.get(bot_key, {}).values())
+    bot = CONFIG["bots"][bot_key]
+
+    if total_q > 100:
+        bot["batch"], bot["interval"] = 50, 300
+    elif total_q > 20:
+        bot["batch"], bot["interval"] = 20, 600
+    else:
+        bot.setdefault("batch", 10)
+        bot.setdefault("interval", 1800)
+
+# ================= MESSAGE ROUTER =================
+@client.on(events.NewMessage)
+async def router(event):
+    for b, bot in CONFIG["bots"].items():
+        if event.chat_id in bot.get("sources", []):
+            QUEUES.setdefault(b, {})
+            QUEUES[b].setdefault(str(event.chat_id), [])
+            QUEUES[b][str(event.chat_id)].append({
+                "text": event.text,
+                "media": bool(event.media),
+                "id": event.id
+            })
+            save_queue(b)
+            return
+
+# ================= WORKER =================
+async def worker(bot_key):
+    while True:
+        if SYSTEM_PAUSED:
+            await asyncio.sleep(1)
+            continue
+
+        bot = CONFIG["bots"][bot_key]
+        if AUTO_SCALE:
+            auto_scale(bot_key)
+
+        sent = 0
+        for src, q in list(QUEUES.get(bot_key, {}).items()):
+            while q and sent < bot["batch"]:
+                msg = q.pop(0)
+                await client.send_message(bot["username"], msg["text"] or "")
+                STATS[bot_key]["total"] += 1
+                STATS[bot_key]["sources"].setdefault(src, 0)
+                STATS[bot_key]["sources"][src] += 1
+                sent += 1
+                save_queue(bot_key)
+
+        if sent:
+            await asyncio.sleep(bot["interval"])
+        await asyncio.sleep(1)
+
+# ================= PANEL =================
+def panel():
+    return [
+        [Button.inline("🤖 Select Bot", b"select_bot")],
+        [Button.inline("⏸ Pause", b"pause"),
+         Button.inline("▶ Start", b"start")],
+        [Button.inline("📊 Status", b"status"),
+         Button.inline("📈 Traffic", b"traffic")]
+    ]
+
+# ================= ADMIN =================
+@admin_bot.on(events.NewMessage)
+async def admin_text(event):
+    if event.sender_id not in ADMINS:
+        return
+    if event.text == "/panel":
+        await event.reply("🛠 ADMIN PANEL", buttons=panel())
+
+# ================= BUTTONS =================
+@admin_bot.on(events.CallbackQuery)
+async def buttons(event):
+    global SYSTEM_PAUSED
+    d = event.data.decode()
+    b = STATE.get("selected_bot")
+
+    if d == "pause":
+        SYSTEM_PAUSED = True
+        await event.edit("⏸ SYSTEM PAUSED", buttons=panel())
+
+    if d == "start":
+        SYSTEM_PAUSED = False
+        await event.edit("▶ SYSTEM STARTED", buttons=panel())
+
+    if d == "status":
+        total_q = sum(len(q) for q in QUEUES.get(b, {}).values())
+        bot = CONFIG["bots"][b]
+        batch = bot["batch"]
+        interval = bot["interval"]
+        eta = (total_q / batch) * interval if batch else 0
+
+        lines = [
+            "📊 BOT STATUS\n",
+            f"📥 Pending Queue : {total_q}",
+            f"📦 Batch         : {batch}",
+            f"⏳ Interval      : {interval}s",
+            f"🕒 ETA           : {int(eta)} seconds",
+            f"⚙ AutoScale     : {'ON' if AUTO_SCALE else 'OFF'}",
+            f"⏸ Paused        : {'YES' if SYSTEM_PAUSED else 'NO'}",
+            "\n📥 Sources:"
+        ]
+
+        for s, q in QUEUES.get(b, {}).items():
+            fwd = STATS[b]["sources"].get(s, 0)
+            lines.append(f" • {s} | Queued: {len(q)} | Sent: {fwd}")
+
+        await event.edit("\n".join(lines), buttons=panel())
+
+    if d == "traffic":
+        lines = ["📈 LIVE TRAFFIC\n"]
+        for s, q in QUEUES.get(b, {}).items():
+            lines.append(f"{s} | Queue: {len(q)}")
+        await event.edit("\n".join(lines), buttons=panel())
+
+# ================= START =================
+async def main():
+    await client.start()
+    await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
+    for b in CONFIG["bots"]:
+        asyncio.create_task(worker(b))
+    print("✅ SYSTEM RUNNING (QUEUE + ETA + PERSISTENT)")
+    await asyncio.gather(
+        client.run_until_disconnected(),
+        admin_bot.run_until_disconnected()
+    )
+
+client.loop.run_until_complete(main())
 import os, json, asyncio, sys
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, Button
