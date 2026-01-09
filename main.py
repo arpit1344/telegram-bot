@@ -34,7 +34,7 @@ admin_bot = TelegramClient("admin_session", API_ID, API_HASH)
 # ================= GLOBAL STATE =================
 SYSTEM_PAUSED = False
 AUTO_SCALE = True
-WORKERS_PER_BOT = 2
+WORKERS_PER_BOT = 1
 
 STATE = {"selected_bot": None, "mode": None}
 
