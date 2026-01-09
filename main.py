@@ -393,11 +393,4 @@ async def main():
         admin_bot.run_until_disconnected()
     )
 
-
-    print("✅ SYSTEM RUNNING (FULL VERSION + REDIS)")
-    await asyncio.gather(
-        client.run_until_disconnected(),
-        admin_bot.run_until_disconnected()
-    )
-
 client.loop.run_until_complete(main())
