@@ -363,8 +363,36 @@ async def main():
     await client.start()
     await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
 
+    def is_paused():
+    return SYSTEM_PAUSED
+
+def is_autoscale():
+    return AUTO_SCALE
+
+
+async def main():
+    await client.start()
+    await admin_bot.start(bot_token=ADMIN_BOT_TOKEN)
+
     for b in CONFIG["bots"]:
-        asyncio.create_task(worker(b))
+        asyncio.create_task(
+            worker(
+                b,
+                client=client,
+                CONFIG=CONFIG,
+                STATS=STATS,
+                auto_scale=auto_scale,
+                get_system_paused=is_paused,
+                get_autoscale=is_autoscale
+            )
+        )
+
+    print("✅ SYSTEM RUNNING (FULL VERSION + REDIS)")
+    await asyncio.gather(
+        client.run_until_disconnected(),
+        admin_bot.run_until_disconnected()
+    )
+
 
     print("✅ SYSTEM RUNNING (FULL VERSION + REDIS)")
     await asyncio.gather(
