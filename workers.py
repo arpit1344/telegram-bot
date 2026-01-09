@@ -1,27 +1,36 @@
 import asyncio
-from telethon.tl.types import MessageMediaWebPage
 from redis_queue import pop
 
-# 🔥 IMPORT GLOBALS FROM main
-import main
 
+async def worker(
+    bot_key,
+    *,
+    client,
+    CONFIG,
+    STATS,
+    auto_scale,
+    get_system_paused,
+    get_autoscale
+):
+    """
+    Redis-based worker
+    No circular imports
+    All dependencies injected from main.py
+    """
 
-async def worker(bot_key):
     while True:
 
-        # ⏸ PAUSE CHECK
-        if main.SYSTEM_PAUSED:
+        if get_system_paused():
             await asyncio.sleep(1)
             continue
 
-        bot = main.CONFIG["bots"].get(bot_key)
+        bot = CONFIG["bots"].get(bot_key)
         if not bot:
             await asyncio.sleep(5)
             continue
 
-        # ⚙ AUTOSCALE
-        if main.AUTO_SCALE:
-            main.auto_scale(bot_key)
+        if get_autoscale():
+            auto_scale(bot_key)
 
         batch = bot.get("batch", 10)
         interval = bot.get("interval", 1800)
@@ -34,20 +43,18 @@ async def worker(bot_key):
                     break
 
                 try:
-                    # 📤 SEND TO BOT
-                    await main.client.send_message(
+                    await client.send_message(
                         bot["username"],
                         msg.get("text") or ""
                     )
 
-                    # 📊 STATS
-                    main.STATS[bot_key]["total"] += 1
-                    main.STATS[bot_key]["sources"].setdefault(str(src), 0)
-                    main.STATS[bot_key]["sources"][str(src)] += 1
+                    STATS[bot_key]["total"] += 1
+                    STATS[bot_key]["sources"].setdefault(str(src), 0)
+                    STATS[bot_key]["sources"][str(src)] += 1
 
                     sent += 1
 
-                except Exception as e:
+                except Exception:
                     await asyncio.sleep(5)
                     break
 
